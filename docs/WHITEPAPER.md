@@ -414,7 +414,7 @@ $D$ (local shard fetches) + ~1,300 bytes (sealed key). Sender bandwidth is const
 
 $$T_{direct} = L_{SR} + \frac{D}{\text{bandwidth}_{SR}}$$
 
-$$T_{ETP} = \underbrace{\frac{240}{\text{bandwidth}_{SR}}}_{\text{key (negligible)}} + \underbrace{\frac{D/k}{\text{bandwidth}_{RN}}}_{\text{k parallel shard fetches}}$$
+$$T_{ETP} = \underbrace{\frac{1300}{\text{bandwidth}_{SR}}}_{\text{key (negligible)}} + \underbrace{\frac{D/k}{\text{bandwidth}_{RN}}}_{\text{k parallel shard fetches}}$$
 
 When $\text{bandwidth}_{RN} \gg \text{bandwidth}_{SR}$ (receiver is near commitment nodes but far from
 sender), $T_{ETP} \ll T_{direct}$. This is the latency advantage.
@@ -437,23 +437,253 @@ but with the sender free to go offline.
 
 ## 6. Comparison with Existing Approaches
 
-| Property | TCP/IP | IPFS | Blockchain | BitTorrent | **ETP** |
-|----------|--------|------|-----------|------------|---------|
-| Payload travels sender→receiver | Yes | Partial | No (ledger only) | Partial | **No** |
-| Content-addressed | No | Yes | Yes | Partial | **Yes** |
-| Immutable | No | Yes | Yes | No | **Yes** |
-| Sender→receiver path O(1) | No | No | N/A | No | **Yes** |
-| Built-in access control | No | No | Partial | No | **Yes** |
-| Forward secrecy (PQ) | TLS layer | No | No | No | **Yes (ML-KEM)** |
-| ZK privacy mode | No | No | Some chains | No | **Yes** |
-| Survives sender going offline | No | If pinned | Yes | If seeded | **Yes** |
-| Receiver proximity optimization | No | Partial | N/A | Partial | **Yes** |
+| Property | TCP/IP | IPFS | BitTorrent | Tahoe-LAFS | Storj | **ETP** |
+|----------|--------|------|-----------|------------|-------|---------|
+| Payload travels sender→receiver | Yes | Partial | Partial | No | No | **No** |
+| Content-addressed | No | Yes | Partial | Yes | Yes | **Yes** |
+| Immutable | No | Yes | No | Yes | Yes | **Yes** |
+| Client-side encryption | TLS layer | No | No | **Yes** | **Yes** | **Yes** |
+| Shards encrypted at rest | N/A | No | No | **Yes** | **Yes** | **Yes** |
+| Erasure-coded redundancy | No | No | No | **Yes** | **Yes** | **Yes** |
+| Sender→receiver path O(1) | No | No | No | No | No | **Yes** |
+| Capability-based access control | No | No | No | **Yes** | **Yes** | **Yes** |
+| Capability bound to receiver identity | No | No | No | No | No | **Yes (ML-KEM)** |
+| Forward secrecy (PQ) | TLS layer | No | No | No | No | **Yes (ML-KEM)** |
+| PQ signatures on commitments | No | No | No | No | No | **Yes (ML-DSA)** |
+| ZK privacy mode | No | No | No | No | No | **Yes** |
+| Survives sender going offline | No | If pinned | If seeded | **Yes** | **Yes** | **Yes** |
+| Receiver proximity optimization | No | Partial | Partial | No | Partial | **Yes** |
+| Deterministic shard placement | No | DHT | DHT peers | Server-assigned | Server-assigned | **Consistent hash** |
+| Append-only audit log | No | No | No | No | No | **Yes** |
+
+**Reading guide:** ETP's unique cells (only ETP has "Yes") are: O(1) sender→receiver path,
+receiver-bound capabilities, per-message PQ forward secrecy, PQ-signed append-only audit log,
+and ZK privacy mode. The encrypted storage, erasure coding, and capability-based access that
+ETP shares with Tahoe-LAFS and Storj are acknowledged as prior art — see Section 7.
 
 ---
 
-## 7. Use Cases
+## 7. Related Work and Prior Art
 
-### 7.1 Large File Fan-Out
+ETP is not built in a vacuum. Its design draws from, recombines, and extends ideas pioneered by
+decades of work in distributed systems, cryptography, and peer-to-peer networking. This section
+honestly acknowledges the lineage and articulates what — if anything — ETP contributes beyond
+its predecessors.
+
+### 7.1 Content-Addressed Storage
+
+**IPFS (InterPlanetary File System, 2015)** [1] introduced content-addressed, Merkle-DAG-based
+storage to mainstream distributed systems. In IPFS, files are split into blocks, each identified
+by a cryptographic hash (CID), and retrieved by requesting the CID from the network. Peers who
+have fetched a block can re-serve it, creating BitTorrent-like swarming.
+
+**Git (2005)** [2] pioneered the idea that a repository's entire history could be addressed by
+content hashes (SHA-1, now SHA-256). Every commit, tree, and blob is content-addressed, making
+the history immutable and independently verifiable.
+
+**What ETP borrows:** Content-addressing as the identity function (`EntityID = H(content || ...)`).
+This is not novel — it is a direct application of the same principle.
+
+**Where ETP diverges:** In IPFS, any peer with the CID can fetch the content; there is no built-in
+access control. In ETP, knowing the `entity_id` is insufficient — the receiver also needs the
+Content Encryption Key (CEK), which is sealed inside the entanglement key. IPFS retrieval is
+*permissionless*; ETP materialization is *capability-gated*. Additionally, ETP encrypts all shards
+at rest (AEAD with CEK), whereas IPFS blocks are stored and served in plaintext by default.
+
+### 7.2 Erasure-Coded Distributed Storage
+
+**Tahoe-LAFS (Least-Authority File Store, 2007)** [3] was among the first systems to combine
+erasure coding with capability-based access control for untrusted storage. Files are encrypted
+client-side, erasure-coded into shares, and distributed to storage servers. Capabilities (read-caps,
+write-caps) are unforgeable tokens that grant specific access rights. Tahoe-LAFS coined the
+principle: *"the server doesn't learn anything about the data."*
+
+**Storj (2018)** [4] applies Reed-Solomon erasure coding over a decentralized network of storage
+nodes. Files are encrypted client-side, split into 80 pieces (of which any 29 can reconstruct),
+and distributed to independent operators. Access grants (serialized macaroons) authorize retrieval.
+
+**Filecoin (2020)** [5] extends IPFS with cryptoeconomic guarantees: storage providers submit
+Proofs of Replication and Proofs of Spacetime to demonstrate that data is physically stored.
+This addresses the data availability problem that ETP's Section 8 (Open Questions) leaves open.
+
+**What ETP borrows:** Erasure coding for redundancy and threshold reconstruction (k-of-n); client-side
+encryption before distribution; the property that storage nodes cannot read content.
+
+**Where ETP diverges:** Tahoe-LAFS, Storj, and Filecoin are *storage systems* — they address "how
+do I store data durably on untrusted nodes?" ETP frames the same infrastructure as a *transfer
+protocol* — the question is "how does entity X get from sender A to receiver B," with the storage
+layer as an intermediate step rather than the end goal. The distinction is one of framing and
+protocol-level abstraction: ETP's three-phase model (commit → entangle → materialize) treats
+the distributed storage as a side-effect of the commit phase, not as the primary interface.
+
+Whether this framing is a meaningful contribution or merely a relabeling is a fair question.
+We argue the value lies in the protocol-level UX: the sender thinks in terms of "commit and
+entangle," not "upload to storage provider and share access grant." The operational semantics
+differ even if the underlying mechanisms are similar.
+
+### 7.3 Append-Only Commitment Logs
+
+**Bitcoin (2008)** [6] introduced the hash-chained, proof-of-work append-only ledger. Each block
+references the hash of the previous block, making history tamper-evident.
+
+**Certificate Transparency (2013)** [7] applies Merkle-tree append-only logs to TLS certificate
+issuance. CAs must publish certificates to public logs, and anyone can verify that a certificate
+was (or was not) logged. CT logs are simpler than blockchain — they require only a trusted log
+operator (or multiple operators for cross-verification) rather than decentralized consensus.
+
+**Hyperledger Fabric (2018)** [8] demonstrates that append-only commitment logs need not be
+permissionless blockchains — permissioned channels with endorsement policies can achieve
+immutability with lower latency and without proof-of-work.
+
+**What ETP borrows:** The commitment log is a direct application of these ideas. The whitepaper
+deliberately does not specify a consensus mechanism (Section 8, Open Question 3) — it could be
+a blockchain, a CT-style Merkle log, or a permissioned ledger. The immutability guarantee
+(Section 4) relies only on the append-only property and hash chaining, not on a specific
+consensus protocol.
+
+**Where ETP diverges:** ETP's commitment log is minimal by design: it stores only a Merkle root
+of encrypted shard hashes, the entity_id, encoding params, and an ML-DSA signature. No shard
+IDs, no content, no CEK. This is a tighter interface than most blockchain-based systems, which
+tend to store more metadata. The log's purpose is *attestation* ("this entity was committed by
+this sender at this time"), not general-purpose state management.
+
+### 7.4 Capability-Based Security
+
+**Dennis & Van Horn (1966)** [9] introduced the capability model: an unforgeable token that
+simultaneously designates a resource and authorizes access to it. The holder of a capability
+can access the resource; without it, the resource is unreachable. Capabilities are the
+*minimum viable authorization* — no identity checks, no ACLs, just possession of proof.
+
+**Macaroons (2014)** [10] extended capabilities with *caveats* — conditions that can be added
+by any party in the delegation chain (e.g., "valid until 2026-03-24," "only from IP range X").
+Storj uses serialized macaroons as its access grant format.
+
+**SPIFFE/SPIRE (2017+)** [11] provides workload identity in distributed systems via short-lived
+X.509 certificates (SVIDs), enabling zero-trust service-to-service authentication.
+
+**What ETP borrows:** The entanglement key is a capability. It designates a resource (the
+committed entity) and authorizes a specific receiver to materialize it. The `access_policy`
+field (one-time, time-bounded, delegatable) is directly inspired by macaroon caveats.
+
+**Where ETP diverges:** The entanglement key combines capability semantics with envelope
+encryption (ML-KEM). A Storj access grant can be used by anyone who possesses it; an ETP
+entanglement key is sealed to a specific receiver's encapsulation key and is useless to anyone
+else. This binds the capability to a cryptographic identity, not just to possession.
+
+### 7.5 Peer-to-Peer Content Distribution
+
+**BitTorrent (2001)** [12] demonstrated that large-file distribution could be decentralized:
+the original seeder uploads once, and peers exchange pieces among themselves. The more popular
+a file becomes, the faster it distributes (unlike client-server, where popularity causes
+congestion). BitTorrent's piece model (splitting content into fixed-size chunks distributed
+across peers) is an ancestor of ETP's shard model.
+
+**NDN (Named Data Networking, 2009+)** [13] proposes replacing IP's host-centric architecture
+with data-centric networking: consumers request data by name, and any node that has a cached
+copy can serve it. The network layer itself becomes content-addressed. NDN's "fetch from
+wherever is closest" philosophy directly parallels ETP's receiver-side materialization from
+nearest commitment nodes.
+
+**What ETP borrows:** Parallel multi-source fetching (from BitTorrent/NDN), the principle that
+the first upload is the expensive operation and subsequent retrievals amortize the cost, and
+the idea that content should flow from where it is cached rather than from a fixed origin.
+
+**Where ETP diverges:** BitTorrent has no built-in encryption or access control — torrents are
+public by default. NDN's data-centric model operates at the network layer, while ETP is an
+application-layer protocol. ETP's commitment phase is a one-time sender operation (not a
+continuous seeding obligation), and the commitment network serves encrypted shards without
+needing to understand or index the content.
+
+### 7.6 Hybrid and Convergent Systems
+
+Several systems have independently converged on similar combinations:
+
+**Tahoe-LAFS + Capability Model** arguably comes closest to ETP's design: encrypted erasure-coded
+storage with capability-based access. ETP's main departure is the protocol framing (transfer vs.
+storage), the ML-KEM sealed envelope (binding capabilities to a specific receiver), and the
+explicit three-phase model with an append-only commitment log.
+
+**Keybase (2014-2020)** [14] combined KBFS (an encrypted, content-addressed filesystem) with
+public-key identity and Merkle-tree-based audit logs. Users could share files by name, with
+client-side encryption and server-side ignorance — similar to ETP's "nodes store ciphertext."
+
+**Secure Scuttlebutt (SSB, 2014+)** [15] uses append-only logs per identity, with content-
+addressed messages and capability-based private groups. SSB's offline-first design (gossip
+replication, no central server) parallels ETP's sender-independence property.
+
+### 7.7 What ETP Contributes
+
+Given the depth of prior art, the honest answer is: **ETP's individual components are not novel.
+Its contribution is the protocol-level synthesis.**
+
+Specifically:
+
+1. **The three-phase model (commit → entangle → materialize) as a transfer primitive.** Prior
+   systems treat content-addressed storage + capabilities as *storage with sharing*. ETP treats
+   the combination as *a data transfer protocol* — an alternative to sending payloads. This is
+   primarily a conceptual contribution. Whether it proves practically valuable depends on
+   whether the abstraction enables workflows that existing tools make awkward.
+
+2. **The sealed entanglement key as a constant-size, receiver-bound, post-quantum transfer
+   token.** Unlike Storj access grants (bearer tokens, anyone who holds them can use them),
+   the entanglement key is cryptographically bound to a specific receiver via ML-KEM-768.
+   Unlike Tahoe-LAFS read-caps (static, no expiry built-in), the entanglement key includes
+   inline access policy (one-time, time-bounded, delegatable) and uses per-seal forward
+   secrecy. The combination of capability + receiver binding + per-message forward secrecy +
+   inline policy in a constant-size token is, to our knowledge, not present in prior systems.
+
+3. **Deterministic receiver-side location derivation.** In IPFS and Storj, the provider/sharer
+   must communicate block CIDs or shard locations to the receiver explicitly. In ETP, the
+   receiver computes shard locations from the entity_id via consistent hashing — no lookup
+   service, no external metadata. This eliminates one round-trip and one point of failure.
+
+4. **Post-quantum security as a default, not an upgrade path.** ML-KEM-768 for key encapsulation
+   and ML-DSA-65 for signatures are the *default* primitives, not optional add-ons. Most
+   existing distributed storage systems use X25519/Ed25519 and mention post-quantum as future
+   work.
+
+We make no claim that these contributions are individually groundbreaking. The question for the
+reader is whether the synthesis, and the mental model it enables ("don't move the data — transfer
+the proof"), justifies a dedicated protocol specification. We believe it does, but acknowledge
+that reasonable reviewers may disagree.
+
+### References
+
+[1] J. Benet, "IPFS — Content Addressed, Versioned, P2P File System," arXiv:1407.3561, 2014.
+
+[2] L. Torvalds, "Git: A distributed version control system," 2005. https://git-scm.com/
+
+[3] Z. Wilcox-O'Hearn, "Tahoe — The Least-Authority Filesystem," ACM CCS StorageSS Workshop, 2008.
+
+[4] Storj Labs, "Storj: A Decentralized Cloud Storage Network Framework," Storj Whitepaper v3, 2018.
+
+[5] Protocol Labs, "Filecoin: A Decentralized Storage Network," Filecoin Whitepaper, 2017 (mainnet 2020).
+
+[6] S. Nakamoto, "Bitcoin: A Peer-to-Peer Electronic Cash System," 2008.
+
+[7] B. Laurie, A. Langley, E. Kasper, "Certificate Transparency," RFC 6962, 2013.
+
+[8] E. Androulaki et al., "Hyperledger Fabric: A Distributed Operating System for Permissioned Blockchains," EuroSys, 2018.
+
+[9] J. B. Dennis and E. C. Van Horn, "Programming Semantics for Multiprogrammed Computations," Communications of the ACM, 9(3), 1966.
+
+[10] A. Birgisson, J. G. Politz, U. Erlingsson, A. Taly, M. Vrable, M. Lentczner, "Macaroons: Cookies with Contextual Caveats for Decentralized Authorization in the Cloud," NDSS, 2014.
+
+[11] CNCF, "SPIFFE: Secure Production Identity Framework for Everyone," https://spiffe.io/, 2017.
+
+[12] B. Cohen, "Incentives Build Robustness in BitTorrent," Workshop on Economics of P2P Systems, 2003.
+
+[13] L. Zhang et al., "Named Data Networking," ACM SIGCOMM CCR, 2014. (NDN project started 2009.)
+
+[14] Keybase, Inc., "Keybase filesystem (KBFS)," https://book.keybase.io/docs/files, 2014-2020.
+
+[15] D. Tarr et al., "Secure Scuttlebutt: An Identity-Centric Protocol for Subjective and Decentralized Applications," IFIP, 2019.
+
+---
+
+## 8. Use Cases
+
+### 8.1 Large File Fan-Out
 A 50 GB dataset is committed once. Any number of receivers can materialize it by each receiving
 a ~1,300-byte sealed entanglement key (ML-KEM-768). Each receiver's materialization time is
 dominated by local shard fetching from nearby nodes — not by the sender's bandwidth or
@@ -461,21 +691,21 @@ availability. For N receivers, direct transfer costs O(50GB × N). ETP costs O(5
 replication) for the commit plus O(~1,300B × N) for the keys — amortized cost per receiver
 approaches zero as N grows.
 
-### 7.2 Immutable Audit Trail
+### 8.2 Immutable Audit Trail
 Every data transfer is permanently recorded. A compliance system can verify: "Entity X was
 committed by Sender A at time T and entangled with Receiver B." No party can deny or alter this.
 
-### 7.3 Secure Messaging
+### 8.3 Secure Messaging
 A message is committed and entangled. The entanglement key is the message notification. The
 content never traverses the public internet as a readable payload. Even if intercepted, the
 entanglement key alone is useless.
 
-### 7.4 State Synchronization
+### 8.4 State Synchronization
 Two distributed systems synchronize state by exchanging entanglement keys. Each system materializes
 the other's state from the commitment network. This is faster than traditional replication because
 shards are fetched locally, and only the delta (new entity) needs materialization.
 
-### 7.5 Cross-Planetary Data Transfer
+### 8.5 Cross-Planetary Data Transfer
 On a Mars colony with 4-24 minute light delay to Earth: commitment nodes on Mars cache shards.
 A sender on Earth commits an entity. The ~1,300-byte sealed entanglement key crosses the void
 once (4-24 minutes). The receiver on Mars materializes from Mars-local commitment nodes (which
@@ -486,7 +716,7 @@ and can happen asynchronously before any specific transfer.
 
 ---
 
-## 8. Open Questions
+## 9. Open Questions
 
 1. **Commitment network economics**: How are commitment nodes incentivized to store and serve shards?
 2. **Shard eviction**: When can shards be garbage collected? (Never? After TTL? After all authorized
@@ -500,7 +730,7 @@ and can happen asynchronously before any specific transfer.
 
 ---
 
-## 9. Conclusion
+## 10. Conclusion
 
 ETP inverts the data transfer paradigm. Rather than asking "how do I send this data to you," it
 asks "how do I prove this data exists, and give you the right to reconstruct it near you."
