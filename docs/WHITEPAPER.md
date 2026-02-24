@@ -14,7 +14,7 @@ entity to a distributed commitment layer, transmits a minimal cryptographic **en
 to the receiver, and the receiver **materializes** the entity through deterministic reconstruction
 from distributed shards. The protocol achieves:
 
-- **Decoupled transfer** — the sender→receiver path carries only a ~240-byte sealed key, independent of entity size. Total system bandwidth is O(entity × replication), but the direct-path bottleneck is eliminated.
+- **Decoupled transfer** — the sender→receiver path carries only a ~1,300-byte sealed key (ML-KEM-768), independent of entity size. Total system bandwidth is O(entity × replication), but the direct-path bottleneck is eliminated.
 - **Immutability by design** — every transfer is a permanent, auditable commitment
 - **Security without trust** — verification is mathematical, not institutional
 - **Geography-optimized materialization** — the receiver fetches shards from the nearest available nodes, converting a long-haul transfer into parallel local fetches
@@ -110,12 +110,12 @@ commitment log (this can be a blockchain, a Merkle DAG, or any immutable append-
 ```json
 {
   "entity_id": "blake3:7f3a8b...",
-  "sender": "ed25519:pubkey...",
+  "sender": "ml-dsa-65:verification_key...",
   "shard_map_root": "blake3:merkle_root_of_encrypted_shard_hashes",
   "encoding_params": { "n": 64, "k": 32, "algorithm": "reed-solomon-gf256" },
   "shape_hash": "blake3:schema_hash...",
   "timestamp": 1740422400,
-  "signature": "ed25519:sig..."
+  "signature": "ml-dsa-65:sig...  (3,309 bytes, quantum-resistant)"
 }
 ```
 
@@ -149,15 +149,16 @@ Critically, the key does **NOT** contain:
 - `encoding_params` — receiver reads these from the commitment record
 - `sender_id` — receiver reads this from the commitment record
 
-The entire key is **sealed** (envelope-encrypted) to the receiver's public key using
-ephemeral key agreement (X25519), providing forward secrecy per transfer.
+The entire key is **sealed** via ML-KEM-768 (FIPS 203) key encapsulation. Each seal
+operation generates a fresh encapsulation, providing forward secrecy per transfer.
 
 The entanglement key is:
-- **Minimal** — ~160 bytes inner payload, ~240 bytes sealed, regardless of entity size
-- **Sealed** — the entire key is encrypted to the receiver's public key
+- **Minimal** — ~160 bytes inner payload, ~1,300 bytes sealed, regardless of entity size
+- **Sealed** — ML-KEM encapsulated to the receiver's encapsulation key (quantum-resistant)
 - **Self-authenticating** — contains the commitment reference for verification
 - **Policy-bound** — includes access rules (one-time, time-limited, delegatable, etc.)
 - **Opaque** — an interceptor sees only random bytes (no metadata leaks)
+- **Post-quantum** — ML-KEM-768 resists both classical and quantum adversaries
 
 #### 2.2.2 Key Properties of Entanglement
 
@@ -165,7 +166,7 @@ The entanglement key is **not the data**. It is the **proof of right to reconstr
 creates several remarkable properties:
 
 1. **Sender→receiver decoupling**: Transferring 1 KB and transferring 1 TB produce the same
-   size sealed entanglement key (~240 bytes). The sender→receiver direct transmission is O(1).
+   size sealed entanglement key (~1,300 bytes). The sender→receiver direct transmission is O(1).
    Note: total system bandwidth is O(entity × replication) across the commit and materialize
    phases. The advantage is not bandwidth elimination — it is *bottleneck relocation*: the
    sender-receiver path (often the slowest link) is reduced to a constant, and the O(entity)
@@ -183,9 +184,20 @@ creates several remarkable properties:
    the entity. The entanglement key proves the sender authorized the receiver. Both are
    cryptographically signed.
 
-4. **Forward secrecy**: Each entanglement key uses ephemeral key agreement (X25519), so
-   compromising long-term keys doesn't expose historical transfers. Each sealed key uses
-   fresh ephemeral randomness.
+4. **Forward secrecy**: Each entanglement key uses a fresh ML-KEM-768 encapsulation, producing
+   a unique (shared_secret, ciphertext) pair per seal. The shared_secret is used once for AEAD
+   encryption and then immediately zeroized. Compromising the receiver's decapsulation key
+   after the shared_secret has been destroyed does not expose historical transfers.
+
+   **Forward secrecy lifecycle:**
+   1. `seal()` calls ML-KEM.Encaps(receiver_ek) → fresh (ss, kem_ct)
+   2. ss is used as the AEAD key for the payload, then zeroized in memory
+   3. kem_ct is embedded in the sealed output
+   4. Only the holder of dk can recover ss from kem_ct (Module-LWE hardness)
+   5. After the receiver processes the sealed key and zeroizes ss, the shared
+      secret is unrecoverable — even if dk is later compromised
+   6. For defense-in-depth, receivers SHOULD rotate ek/dk periodically;
+      old dk values MUST be securely destroyed after rotation
 
 ### Phase 3: MATERIALIZE
 
@@ -218,7 +230,7 @@ ETP materialization: **pull k shards in parallel from the nearest nodes in the c
 Traditional:    S ════════════════(entire payload)════════════════> R
                   Bottleneck: sender upload × distance to receiver
 
-ETP:            S ──(~240B sealed key)──> R
+ETP:            S ──(~1,300B sealed key)──> R
                                           R <── encrypted shard from nearby Node
                                           R <── encrypted shard from nearby Node
                                           R <── encrypted shard from nearby Node
@@ -255,7 +267,7 @@ whereas direct transfer costs O(entity × receiver_count).
 | Sender denies transfer occurred | Commitment record is on immutable append-only log with sender's signature |
 | Receiver claims different data was sent | Entity ID is deterministic hash of content; both parties can verify |
 | Replay attack (re-use entanglement key) | Access policy can enforce one-time materialization; commitment nodes track access |
-| Quantum computing threat | BLAKE3 hashes and erasure coding are information-theoretic (quantum-immune); signatures and key exchange upgradable to Dilithium/Kyber |
+| Quantum computing threat | **Full post-quantum security**: ML-KEM-768 (FIPS 203) for key encapsulation, ML-DSA-65 (FIPS 204) for signatures, BLAKE2b/BLAKE3 for hashing (quantum-resistant), erasure coding is information-theoretic (quantum-immune). No X25519 or Ed25519 in the protocol. |
 
 ### 3.2 Zero-Knowledge Transfer Mode
 
@@ -320,8 +332,9 @@ actually "appending a new version." The full history is always auditable.
 **Traditional**: Latency = f(distance, hops, payload_size)  
 **ETP**: Latency = f(key_transmission) + f(nearest_shard_fetch)
 
-The sealed entanglement key is ~240 bytes — its transmission is near-instantaneous on any
-network. Shard fetching is parallelized from the nearest nodes.
+The sealed entanglement key is ~1,300 bytes (increased from ~240 bytes pre-quantum due to
+ML-KEM-768 ciphertext overhead — the honest cost of quantum resistance). Its transmission
+is near-instantaneous on any network. Shard fetching is parallelized from the nearest nodes.
 
 **What this means precisely:**
 - The sender→receiver latency is reduced to O(1) (the key is constant-size)
@@ -339,7 +352,7 @@ path.
 **Traditional**: New York → Tokyo = ~200ms RTT minimum (speed of light through fiber).  
 For a 1 GB file at 100 Mbps effective throughput: ~80 seconds, bottlenecked by the single path.
 
-**ETP**: The sender in New York transmits a ~240-byte sealed key to the receiver in Tokyo
+**ETP**: The sender in New York transmits a ~1,300-byte sealed key to the receiver in Tokyo
 (one round trip, ~200ms). The receiver then fetches k encrypted shards in parallel from
 Tokyo-local commitment nodes (~5-10ms RTT each). Materialization time is dominated by
 *local bandwidth*, not transoceanic latency.
@@ -379,7 +392,7 @@ Let:
 |--------|----------------|-----|
 | Sender upload (per transfer) | $D$ | — (already committed) |
 | Sender upload (commit, once) | — | $D \cdot r$ |
-| Sender→receiver direct | $D$ | $O(1)$ (~240 bytes) |
+| Sender→receiver direct | $D$ | $O(1)$ (~1,300 bytes) |
 | Receiver download | $D$ | $D$ (k shards × $D/k$) |
 | **Total system, 1 receiver** | $D$ | $D \cdot r + D \approx D(r+1)$ |
 | **Total system, N receivers** | $D \cdot N$ | $D \cdot r + D \cdot N$ |
@@ -395,7 +408,7 @@ For $N = 1$: $B_{ETP} = D(r+1) > D = B_{direct}$. **ETP is strictly worse for si
 For $N > r$: $B_{ETP} \approx D \cdot N \approx B_{direct}$. **ETP amortizes to parity.**
 
 For large $N$: The commit cost $D \cdot r$ becomes negligible. Each additional receiver costs only
-$D$ (local shard fetches) + ~240 bytes (sealed key). Sender bandwidth is constant after commit.
+$D$ (local shard fetches) + ~1,300 bytes (sealed key). Sender bandwidth is constant after commit.
 
 **Latency costs:**
 
@@ -431,7 +444,7 @@ but with the sender free to go offline.
 | Immutable | No | Yes | Yes | No | **Yes** |
 | Sender→receiver path O(1) | No | No | N/A | No | **Yes** |
 | Built-in access control | No | No | Partial | No | **Yes** |
-| Forward secrecy | TLS layer | No | No | No | **Yes** |
+| Forward secrecy (PQ) | TLS layer | No | No | No | **Yes (ML-KEM)** |
 | ZK privacy mode | No | No | Some chains | No | **Yes** |
 | Survives sender going offline | No | If pinned | Yes | If seeded | **Yes** |
 | Receiver proximity optimization | No | Partial | N/A | Partial | **Yes** |
@@ -442,10 +455,11 @@ but with the sender free to go offline.
 
 ### 7.1 Large File Fan-Out
 A 50 GB dataset is committed once. Any number of receivers can materialize it by each receiving
-a ~240-byte sealed entanglement key. Each receiver's materialization time is dominated by local
-shard fetching from nearby nodes — not by the sender's bandwidth or availability. For N
-receivers, direct transfer costs O(50GB × N). ETP costs O(50GB × replication) for the commit
-plus O(~240B × N) for the keys — amortized cost per receiver approaches zero as N grows.
+a ~1,300-byte sealed entanglement key (ML-KEM-768). Each receiver's materialization time is
+dominated by local shard fetching from nearby nodes — not by the sender's bandwidth or
+availability. For N receivers, direct transfer costs O(50GB × N). ETP costs O(50GB ×
+replication) for the commit plus O(~1,300B × N) for the keys — amortized cost per receiver
+approaches zero as N grows.
 
 ### 7.2 Immutable Audit Trail
 Every data transfer is permanently recorded. A compliance system can verify: "Entity X was
@@ -463,7 +477,7 @@ shards are fetched locally, and only the delta (new entity) needs materializatio
 
 ### 7.5 Cross-Planetary Data Transfer
 On a Mars colony with 4-24 minute light delay to Earth: commitment nodes on Mars cache shards.
-A sender on Earth commits an entity. The ~240-byte sealed entanglement key crosses the void
+A sender on Earth commits an entity. The ~1,300-byte sealed entanglement key crosses the void
 once (4-24 minutes). The receiver on Mars materializes from Mars-local commitment nodes (which
 replicate shards during off-peak periods). Materialization time is bounded by Mars-local network
 speed, not Earth-Mars light delay. Note: initial shard replication to Mars nodes still incurs
@@ -492,7 +506,7 @@ ETP inverts the data transfer paradigm. Rather than asking "how do I send this d
 asks "how do I prove this data exists, and give you the right to reconstruct it near you."
 
 The result is a protocol where:
-- **The sender→receiver path is O(1)** — a constant-size sealed key, regardless of entity size
+- **The sender→receiver path is O(1)** — a constant-size sealed key (~1,300B), regardless of entity size
 - **Total system bandwidth is higher than direct transfer** — but the bottleneck shifts from
   the sender-receiver link to receiver-local fetches, with amortized fan-out
 - **Transfer is immutable** by mathematical construction, not policy

@@ -6,9 +6,9 @@
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                     ENTANGLEMENT TRANSFER PROTOCOL v2                    │
 │                                                                         │
-│  ┌──────────┐  ~240 bytes      ┌──────────┐                            │
+│  ┌──────────┐  ~1300 bytes     ┌──────────┐                            │
 │  │  SENDER  │ ════════════════ │ RECEIVER │                            │
-│  │          │  sealed key      │          │                            │
+│  │          │  ML-KEM sealed  │          │                            │
 │  └────┬─────┘  (opaque)        └────┬─────┘                            │
 │       │                             │                                   │
 │       │ COMMIT                      │ MATERIALIZE                       │
@@ -113,13 +113,18 @@ The Entity Engine is the sender-side component that prepares entities for commit
 │  Inner size: ~160 bytes                                │
 │                                                        │
 │  Sealing (envelope encryption):                        │
-│  1. Generate ephemeral randomness (forward secrecy)     │
-│  2. Derive symmetric key from receiver_pubkey           │
+│  1. Generate ephemeral ML-KEM encapsulation            │
+│  2. Derive AEAD key from ML-KEM shared secret          │
 │  3. AEAD encrypt entire inner payload                   │
-│  4. Package: fingerprint + ephemeral + nonce + ciphertext│
+│  4. Package: kem_ct(1088) + nonce(16) + aead_ct + tag   │
+│                                                        │
+│  Forward Secrecy Lifecycle:                              │
+│  • shared_secret used once, then zeroized                │
+│  • Only holder of dk can recover ss from kem_ct          │
+│  • Receivers SHOULD rotate ek/dk periodically            │
 │                                                        │
 │  Output:                                               │
-│  └── Sealed EntanglementKey (~240 bytes, opaque)        │
+│  └── Sealed EntanglementKey (~1,300 bytes, opaque)       │
 └──────────────────────────────────────────────────────┘
 ```
 
@@ -234,7 +239,7 @@ The Entity Engine is the sender-side component that prepares entities for commit
    │     key (entity_id + CEK    │                          │
    │     + ref + policy)         │                          │
    │  8. Seal key to receiver ──────────────────────────▶  │
-   │     (~240 bytes, opaque)    │                          │
+   │     (~1,300 bytes, ML-KEM)  │                          │
    │                             │                          │
    │  ✓ Sender done.             │          9. Unseal key   │
    │    Can go offline.          │             (private key) │
@@ -271,11 +276,11 @@ The Entity Engine is the sender-side component that prepares entities for commit
 │  ├── Delegatable permissions                       │
 │  └── Revocable entanglement                        │
 │                                                    │
-│  Layer 5: SEALED ENVELOPE (NEW)                    │
-│  ├── Entire key encrypted to receiver's pubkey     │
-│  ├── Ephemeral randomness per seal (forward secrecy)│
-│  ├── Zero metadata leakage on interception         │
-│  └── Receiver identity verified during unseal      │
+│  Layer 5: SEALED ENVELOPE (ML-KEM-768)                 │
+│  ├── Entire key encapsulated via ML-KEM-768 (FIPS 203)   │
+│  ├── Fresh encapsulation per seal (forward secrecy)      │
+│  ├── Zero metadata leakage on interception               │
+│  └── Receiver identity (dk) verified during unseal        │
 │                                                    │
 │  Layer 4: SHARD ENCRYPTION (NEW)                   │
 │  ├── AEAD encryption with random 256-bit CEK       │
@@ -288,11 +293,11 @@ The Entity Engine is the sender-side component that prepares entities for commit
 │  ├── ZK-proofs on commitment records               │
 │  └── Verifiable computation on hidden data         │
 │                                                    │
-│  Layer 2: CRYPTOGRAPHIC INTEGRITY                  │
-│  ├── Content-addressed entities (BLAKE3)           │
-│  ├── Merkle root over encrypted shard hashes       │
-│  ├── Ed25519 signatures on commitments             │
-│  └── AEAD tags on each shard (32 bytes)            │
+│  Layer 2: CRYPTOGRAPHIC INTEGRITY (Post-Quantum)       │
+│  ├── Content-addressed entities (BLAKE3)              │
+│  ├── Merkle root over encrypted shard hashes           │
+│  ├── ML-DSA-65 signatures on commitments (FIPS 204)    │
+│  └── AEAD tags on each shard (32 bytes)                │
 │                                                    │
 │  Layer 1: INFORMATION-THEORETIC SECURITY           │
 │  ├── Erasure coding (k-of-n threshold)             │
@@ -328,7 +333,7 @@ The Entity Engine is the sender-side component that prepares entities for commit
 | Shards → Encrypted Shards | O(entity) + O(n×32) tags | Sender (local) | None |
 | Encrypted Shards → Nodes | O(entity × replication) | Sender → Network | Amortized, async |
 | Commitment Record | O(1) ~512B | Sender → Log | Minimal |
-| **Entanglement Key** | **O(1) ~240B sealed** | **Sender → Receiver** | **Near zero** |
+| **Entanglement Key** | **O(1) ~1,300B sealed** | **Sender → Receiver** | **Near zero** |
 | Encrypted Shards → Receiver | O(entity) | Network → Receiver | Local fetches |
 | Decrypt + Decode | O(entity) | Receiver (local) | None |
 
@@ -348,8 +353,8 @@ parallel local O(entity/k) fetches, plus amortized fan-out to multiple receivers
 | Component | Recommended | Rationale |
 |-----------|------------|-----------|
 | Hash function | BLAKE3 | Fast, secure, parallelizable, ZK-friendly |
-| Signatures | Ed25519 / Dilithium | Ed25519 for speed; Dilithium for post-quantum |
-| Key exchange | X25519 | Proven, fast ephemeral key agreement |
+| Signatures | ML-DSA-65 (FIPS 204) | Post-quantum (Dilithium); NIST Level 3 |
+| Key encapsulation | ML-KEM-768 (FIPS 203) | Post-quantum (Kyber); replaces X25519 |
 | Erasure coding | Reed-Solomon GF(2^8) | Well-understood, deterministic, efficient |
 | Commitment log | Merkle DAG / append-only ledger | Immutable, verifiable, decentralizable |
 | Shard placement | Consistent hashing (jump hash) | Deterministic, balanced, minimal disruption |
