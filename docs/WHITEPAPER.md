@@ -69,17 +69,23 @@ entity to a distributed commitment layer.
 
 #### 2.1.1 Deterministic Sharding
 
-The entity is decomposed into `n` shards using deterministic erasure coding:
+The entity is decomposed into `n` shards using deterministic erasure coding,
+then each shard is encrypted with a random Content Encryption Key (CEK):
 
 ```
-shards = ErasureEncode(entity, n, k)
+plaintext_shards = ErasureEncode(entity, n, k)
+CEK = random(256 bits)
+encrypted_shards = [AEAD_Encrypt(CEK, shard, nonce=index) for index, shard in enumerate(plaintext_shards)]
 ```
 
 Where:
 - `n` = total number of shards produced
 - `k` = minimum number of shards needed to reconstruct (k < n)
 - The encoding is deterministic: same input always produces same shards
-- Each shard is content-addressed: `ShardID = H(shard_content || entity_id || shard_index)`
+- `CEK` = a random 256-bit Content Encryption Key, unique per entity
+- Each shard is encrypted with AEAD (authenticated encryption) before distribution
+- Commitment nodes store **only ciphertext** — they cannot read shard content
+- Each encrypted shard is integrity-checked: `ShardHash = H(encrypted_shard || entity_id || shard_index)`
 
 #### 2.1.2 Distributed Shard Placement
 
@@ -105,7 +111,7 @@ commitment log (this can be a blockchain, a Merkle DAG, or any immutable append-
 {
   "entity_id": "blake3:7f3a8b...",
   "sender": "ed25519:pubkey...",
-  "shard_map_root": "blake3:merkle_root_of_shard_ids",
+  "shard_map_root": "blake3:merkle_root_of_encrypted_shard_hashes",
   "encoding_params": { "n": 64, "k": 32, "algorithm": "reed-solomon-gf256" },
   "shape_hash": "blake3:schema_hash...",
   "timestamp": 1740422400,
@@ -113,7 +119,11 @@ commitment log (this can be a blockchain, a Merkle DAG, or any immutable append-
 }
 ```
 
-This record is the **proof that the entity exists and was committed**. It is small (< 1 KB),
+Critical security property: the commitment record contains **no individual shard IDs**.
+Only a Merkle root of hashes of **encrypted** shards is stored. This reveals nothing
+about the plaintext content — they are hashes of ciphertext.
+
+The record is the **proof that the entity exists and was committed**. It is small (< 1 KB),
 immutable, and independently verifiable.
 
 ### Phase 2: ENTANGLE
@@ -123,20 +133,31 @@ that traverses the sender → receiver path directly.
 
 #### 2.2.1 The Entanglement Key
 
+The entanglement key contains exactly **three secrets** and a policy:
+
 ```
 EntanglementKey = {
-  entity_id,
-  commitment_log_reference,
-  receiver_decryption_material,
-  access_policy
+  entity_id,              // 32 bytes — which entity to materialize
+  content_encryption_key, // 32 bytes — CEK to decrypt shards
+  commitment_ref,         // 32 bytes — hash of commitment record
+  access_policy           // ~20-50 bytes — materialization rules
 }
 ```
 
+Critically, the key does **NOT** contain:
+- `shard_ids` — receiver derives shard locations from `entity_id` via consistent hashing
+- `encoding_params` — receiver reads these from the commitment record
+- `sender_id` — receiver reads this from the commitment record
+
+The entire key is **sealed** (envelope-encrypted) to the receiver's public key using
+ephemeral key agreement (X25519), providing forward secrecy per transfer.
+
 The entanglement key is:
-- **Tiny** — typically 256-512 bytes regardless of entity size
-- **Encrypted** — sealed to the receiver's public key
+- **Minimal** — ~160 bytes inner payload, ~240 bytes sealed, regardless of entity size
+- **Sealed** — the entire key is encrypted to the receiver's public key
 - **Self-authenticating** — contains the commitment reference for verification
 - **Policy-bound** — includes access rules (one-time, time-limited, delegatable, etc.)
+- **Opaque** — an interceptor sees only random bytes (no metadata leaks)
 
 #### 2.2.2 Key Properties of Entanglement
 
@@ -144,18 +165,23 @@ The entanglement key is **not the data**. It is the **proof of right to reconstr
 creates several remarkable properties:
 
 1. **Size invariance**: Transferring 1 KB and transferring 1 TB produce the same size
-   entanglement key (~512 bytes). The "transfer" takes the same time regardless of entity size.
+   sealed entanglement key (~240 bytes). The sender→receiver transmission is O(1).
 
-2. **Interception resistance**: An attacker who captures the entanglement key cannot reconstruct
-   the entity without also compromising k-of-n commitment nodes AND possessing the receiver's
-   private key.
+2. **Three-layer interception resistance**: An attacker faces three independent barriers:
+   - **Layer 1 (Sealed envelope)**: The key is encrypted to the receiver's public key;
+     intercepting it yields opaque ciphertext with no metadata
+   - **Layer 2 (Encrypted shards)**: Even if an attacker queries the commitment network
+     directly, all shards are AEAD-encrypted; without the CEK, they are useless
+   - **Layer 3 (Minimal log)**: The commitment log contains only a Merkle root of
+     ciphertext hashes — no individual shard IDs, no content, no CEK
 
 3. **Non-repudiation**: The commitment record on the append-only log proves the sender committed
    the entity. The entanglement key proves the sender authorized the receiver. Both are
    cryptographically signed.
 
-4. **Forward secrecy**: Each entanglement key can use ephemeral key agreement (X25519), so
-   compromising long-term keys doesn't expose historical transfers.
+4. **Forward secrecy**: Each entanglement key uses ephemeral key agreement (X25519), so
+   compromising long-term keys doesn't expose historical transfers. Each sealed key uses
+   fresh ephemeral randomness.
 
 ### Phase 3: MATERIALIZE
 
@@ -164,16 +190,18 @@ The receiver uses the entanglement key to **reconstruct** the entity from the co
 #### 2.3.1 Reconstruction Process
 
 ```
-1. Parse entanglement key → extract entity_id, commitment reference
-2. Fetch commitment record from the append-only log
-3. Verify commitment record signature (sender authenticity)
-4. Compute shard locations: ConsistentHash(entity_id || shard_index) for each shard
-5. Fetch k-of-n shards from nearest available commitment nodes (parallel)
-6. Verify each shard: ShardID == H(shard_content || entity_id || shard_index)
-7. ErasureDecode(shards, k) → entity
-8. Verify: H(entity_content || shape || timestamp || sender_pubkey) == entity_id
-9. Decrypt entity content using receiver_decryption_material
-10. Entity materialized. Transfer complete.
+1. Unseal entanglement key with receiver's private key → extract entity_id, CEK, commitment_ref
+2. Fetch commitment record from append-only log using entity_id
+3. Verify commitment record: H(record) == commitment_ref (integrity check)
+4. Verify commitment record signature (sender authenticity)
+5. Read encoding params (n, k) from commitment record
+6. Derive shard locations: ConsistentHash(entity_id || shard_index) for index in 0..n-1
+7. Fetch k-of-n ENCRYPTED shards from nearest available commitment nodes (parallel)
+8. Decrypt each shard: AEAD_Decrypt(CEK, encrypted_shard, nonce=shard_index)
+   — AEAD authentication tag is verified BEFORE decryption (tamper detection)
+9. ErasureDecode(decrypted_shards, k) → entity content
+10. Verify: H(entity_content || shape || timestamp || sender_pubkey) == entity_id
+11. Entity materialized. Transfer complete.
 ```
 
 #### 2.3.2 Why This Is Fast
@@ -206,12 +234,14 @@ which can be geographically local.
 
 | Threat | Mitigation |
 |--------|-----------|
-| Man-in-the-middle intercepts entanglement key | Key is encrypted to receiver's public key; useless without private key |
-| Attacker compromises commitment nodes | Need k-of-n shards; compromise of < k nodes reveals nothing (information-theoretic security) |
+| Man-in-the-middle intercepts entanglement key | Entire key is sealed (envelope-encrypted) to receiver's public key; interceptor sees opaque ciphertext with zero metadata |
+| Attacker scrapes commitment log | Log contains only Merkle root of encrypted shard hashes — no shard IDs, no content, no CEK |
+| Attacker fetches shards from nodes | Shards are AEAD-encrypted with CEK; without CEK, ciphertext is computationally useless |
+| Attacker compromises < k nodes | Information-theoretic security: < k shards (even decrypted) reveal zero information about the entity |
 | Sender denies transfer occurred | Commitment record is on immutable append-only log with sender's signature |
 | Receiver claims different data was sent | Entity ID is deterministic hash of content; both parties can verify |
 | Replay attack (re-use entanglement key) | Access policy can enforce one-time materialization; commitment nodes track access |
-| Quantum computing threat | Use post-quantum hash (BLAKE3) and post-quantum signatures (Dilithium); erasure coding is information-theoretic |
+| Quantum computing threat | BLAKE3 hashes and erasure coding are information-theoretic (quantum-immune); signatures and key exchange upgradable to Dilithium/Kyber |
 
 ### 3.2 Zero-Knowledge Transfer Mode
 

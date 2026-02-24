@@ -1,18 +1,18 @@
-# ETP Architecture
+# ETP Architecture (v2 — Option C Security)
 
 ## System Overview
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
-│                     ENTANGLEMENT TRANSFER PROTOCOL                      │
+│                     ENTANGLEMENT TRANSFER PROTOCOL v2                    │
 │                                                                         │
-│  ┌──────────┐    512 bytes     ┌──────────┐                            │
-│  │  SENDER  │ ──────────────── │ RECEIVER │                            │
-│  │          │  entanglement    │          │                            │
-│  └────┬─────┘      key        └────┬─────┘                            │
+│  ┌──────────┐  ~240 bytes      ┌──────────┐                            │
+│  │  SENDER  │ ════════════════ │ RECEIVER │                            │
+│  │          │  sealed key      │          │                            │
+│  └────┬─────┘  (opaque)        └────┬─────┘                            │
 │       │                             │                                   │
 │       │ COMMIT                      │ MATERIALIZE                       │
-│       │ (shards)                    │ (fetch k-of-n)                    │
+│       │ (encrypted shards)          │ (unseal → derive → fetch → decrypt)│
 │       ▼                             ▼                                   │
 │  ┌─────────────────────────────────────────────────────────────────┐   │
 │  │                    COMMITMENT LAYER                              │   │
@@ -21,19 +21,20 @@
 │  │  │              COMMITMENT LOG (Append-Only)                  │  │   │
 │  │  │                                                            │  │   │
 │  │  │  Record 1 ← Record 2 ← Record 3 ← ... ← Record N        │  │   │
-│  │  │  (cryptographic chain — each record references previous)   │  │   │
+│  │  │  (NO shard_ids — Merkle root of ciphertext hashes only)    │  │   │
 │  │  └───────────────────────────────────────────────────────────┘  │   │
 │  │                                                                  │   │
 │  │  ┌───────────────────────────────────────────────────────────┐  │   │
-│  │  │              COMMITMENT NODES (Shard Storage)              │  │   │
+│  │  │           COMMITMENT NODES (Encrypted Shard Storage)       │  │   │
 │  │  │                                                            │  │   │
 │  │  │  ┌─────┐  ┌─────┐  ┌─────┐  ┌─────┐  ┌─────┐          │  │   │
 │  │  │  │ N1  │  │ N2  │  │ N3  │  │ N4  │  │ N5  │  ...     │  │   │
 │  │  │  │     │  │     │  │     │  │     │  │     │          │  │   │
-│  │  │  │ s1  │  │ s2  │  │ s1  │  │ s3  │  │ s2  │          │  │   │
-│  │  │  │ s4  │  │ s5  │  │ s3  │  │ s6  │  │ s4  │          │  │   │
+│  │  │  │ 🔒  │  │ 🔒  │  │ 🔒  │  │ 🔒  │  │ 🔒  │          │  │   │
+│  │  │  │ 🔒  │  │ 🔒  │  │ 🔒  │  │ 🔒  │  │ 🔒  │          │  │   │
 │  │  │  └─────┘  └─────┘  └─────┘  └─────┘  └─────┘          │  │   │
-│  │  │       (shards distributed via consistent hashing)        │  │   │
+│  │  │    (AEAD-encrypted ciphertext — nodes cannot read)       │  │   │
+│  │  │    (keyed by (entity_id, index) — derivable by receiver) │  │   │
 │  │  └───────────────────────────────────────────────────────────┘  │   │
 │  └─────────────────────────────────────────────────────────────────┘   │
 └─────────────────────────────────────────────────────────────────────────┘
@@ -48,105 +49,124 @@
 The Entity Engine is the sender-side component that prepares entities for commitment.
 
 ```
-┌─────────────────────────────────────────────┐
-│              ENTITY ENGINE                    │
-│                                               │
-│  ┌─────────────┐    ┌──────────────────┐    │
-│  │   Content    │    │   Shape Analyzer  │    │
-│  │   Ingester   │───▶│   (schema detect) │    │
-│  └─────────────┘    └────────┬─────────┘    │
-│                               │               │
-│                    ┌──────────▼─────────┐    │
-│                    │  Identity Computer  │    │
-│                    │  H(content||shape|| │    │
-│                    │    time||pubkey)    │    │
-│                    └──────────┬─────────┘    │
-│                               │               │
-│                    ┌──────────▼─────────┐    │
-│                    │  Erasure Encoder   │    │
-│                    │  (n shards, k min) │    │
-│                    └──────────┬─────────┘    │
-│                               │               │
-│                    ┌──────────▼─────────┐    │
-│                    │  Shard Distributor │    │
-│                    │  (consistent hash) │    │
-│                    └──────────┬─────────┘    │
-│                               │               │
-│                    ┌──────────▼─────────┐    │
-│                    │  Commitment Writer │    │
-│                    │  (append to log)   │    │
-│                    └───────────────────-┘    │
-└─────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────┐
+│              ENTITY ENGINE (v2)                    │
+│                                                    │
+│  ┌─────────────┐    ┌──────────────────┐          │
+│  │   Content    │    │   Shape Analyzer  │          │
+│  │   Ingester   │───▶│   (schema detect) │          │
+│  └─────────────┘    └────────┬─────────┘          │
+│                               │                     │
+│                    ┌──────────▼─────────┐          │
+│                    │  Identity Computer  │          │
+│                    │  H(content||shape|| │          │
+│                    │    time||pubkey)    │          │
+│                    └──────────┬─────────┘          │
+│                               │                     │
+│                    ┌──────────▼─────────┐          │
+│                    │  Erasure Encoder   │          │
+│                    │  (n shards, k min) │          │
+│                    └──────────┬─────────┘          │
+│                               │ plaintext shards    │
+│                    ┌──────────▼─────────┐          │
+│                    │  ★ Shard Encryptor │ ◀─ NEW   │
+│                    │  CEK = random(256) │          │
+│                    │  AEAD(CEK, shard,  │          │
+│                    │    nonce=index)    │          │
+│                    └──────────┬─────────┘          │
+│                               │ encrypted shards    │
+│                    ┌──────────▼─────────┐          │
+│                    │  Shard Distributor │          │
+│                    │  (consistent hash) │          │
+│                    └──────────┬─────────┘          │
+│                               │                     │
+│                    ┌──────────▼─────────┐          │
+│                    │  Commitment Writer │          │
+│                    │  (Merkle root only)│          │
+│                    └────────────────────┘          │
+└─────────────────────────────────────────────────┘
 ```
 
-### 2. Entanglement Key Generator
-
-After commitment, the sender produces the entanglement key for the receiver.
+### 2. Entanglement Key Generator (v2 — Minimal Sealed Key)
 
 ```
 ┌──────────────────────────────────────────────────────┐
-│           ENTANGLEMENT KEY GENERATOR                   │
+│        ENTANGLEMENT KEY GENERATOR (Option C)           │
 │                                                        │
 │  Inputs:                                               │
 │  ├── entity_id (from commitment)                       │
-│  ├── commitment_log_ref (pointer to record)            │
+│  ├── CEK (from shard encryption)            ◀─ NEW    │
+│  ├── commitment_ref (hash of record)                   │
 │  ├── receiver_pubkey (destination identity)             │
 │  └── access_policy (rules for materialization)          │
 │                                                        │
-│  Process:                                              │
-│  1. Generate ephemeral X25519 keypair                   │
-│  2. Derive shared secret with receiver_pubkey           │
-│  3. Encrypt decryption material with shared secret      │
-│  4. Pack: entity_id + log_ref + encrypted_material      │
-│  5. Sign with sender's Ed25519 key                      │
+│  Inner Payload (3 secrets + policy):                   │
+│  ┌─────────────────────────────────────────────┐      │
+│  │ entity_id:      32 bytes (hash)              │      │
+│  │ CEK:            32 bytes (symmetric key)     │ NEW  │
+│  │ commitment_ref: 32 bytes (record hash)       │      │
+│  │ access_policy:  ~20-50 bytes (rules)         │      │
+│  │                                               │      │
+│  │ REMOVED: shard_ids, encoding_params,          │      │
+│  │          sender_id (all derivable from record)│      │
+│  └─────────────────────────────────────────────┘      │
+│  Inner size: ~160 bytes                                │
+│                                                        │
+│  Sealing (envelope encryption):                        │
+│  1. Generate ephemeral randomness (forward secrecy)     │
+│  2. Derive symmetric key from receiver_pubkey           │
+│  3. AEAD encrypt entire inner payload                   │
+│  4. Package: fingerprint + ephemeral + nonce + ciphertext│
 │                                                        │
 │  Output:                                               │
-│  └── EntanglementKey (256-512 bytes, sealed)            │
+│  └── Sealed EntanglementKey (~240 bytes, opaque)        │
 └──────────────────────────────────────────────────────┘
 ```
 
-### 3. Materialization Engine
-
-The receiver-side component that reconstructs entities.
+### 3. Materialization Engine (v2 — Unseal, Derive, Decrypt)
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                 MATERIALIZATION ENGINE                        │
+│              MATERIALIZATION ENGINE (Option C)                │
 │                                                               │
 │  ┌────────────────┐   ┌──────────────────────┐              │
-│  │ Key Decryptor   │──▶│ Commitment Verifier   │              │
-│  │ (unseal key,    │   │ (fetch & verify       │              │
-│  │  extract refs)  │   │  commitment record)   │              │
+│  │ ★ Key Unsealer  │──▶│ Commitment Verifier   │              │
+│  │ (unseal with    │   │ (fetch record,        │              │
+│  │  private key,   │   │  verify H(record) ==  │              │
+│  │  extract CEK)   │   │  commitment_ref)      │              │
 │  └────────────────┘   └──────────┬───────────┘              │
 │                                   │                           │
 │                        ┌──────────▼───────────┐              │
-│                        │  Shard Locator        │              │
-│                        │  (compute locations   │              │
-│                        │   via consistent hash) │              │
+│                        │  ★ Location Deriver   │  ◀─ NEW     │
+│                        │  ConsistentHash(       │              │
+│                        │    entity_id || index)  │              │
+│                        │  (NO shard_ids needed) │              │
 │                        └──────────┬───────────┘              │
 │                                   │                           │
 │                        ┌──────────▼───────────┐              │
 │                        │  Parallel Fetcher     │              │
-│                        │  (fetch k-of-n from   │              │
-│                        │   nearest nodes)       │              │
+│                        │  (fetch k-of-n        │              │
+│                        │   ENCRYPTED shards    │              │
+│                        │   from nearest nodes)  │              │
 │                        └──────────┬───────────┘              │
 │                                   │                           │
 │           ┌───────────────────────┼───────────────┐          │
 │           ▼            ▼          ▼         ▼     ▼          │
-│        [shard1]    [shard2]   [shard3]  [shard4] ...         │
+│        [🔒 e1]    [🔒 e2]   [🔒 e3]  [🔒 e4]  ...         │
 │           │            │          │         │                 │
 │           └───────────────────────┼───────────────┘          │
 │                                   │                           │
 │                        ┌──────────▼───────────┐              │
-│                        │  Shard Verifier       │              │
-│                        │  (verify each shard   │              │
-│                        │   against ShardID)    │              │
+│                        │  ★ Shard Decryptor    │  ◀─ NEW     │
+│                        │  AEAD_Decrypt(CEK,    │              │
+│                        │    enc_shard, index)  │              │
+│                        │  (tag verified first) │              │
 │                        └──────────┬───────────┘              │
 │                                   │                           │
 │                        ┌──────────▼───────────┐              │
 │                        │  Erasure Decoder      │              │
 │                        │  (reconstruct from    │              │
-│                        │   k verified shards)  │              │
+│                        │   k decrypted shards) │              │
 │                        └──────────┬───────────┘              │
 │                                   │                           │
 │                        ┌──────────▼───────────┐              │
@@ -186,9 +206,10 @@ The receiver-side component that reconstructs entities.
        │1│  │2│  │3│ │4│  │5│ │6│ │7│  │8│ │9│
        └─┘  └─┘  └─┘ └─┘  └─┘ └─┘ └─┘  └─┘ └─┘
 
-       Commitment nodes store shards and replicate
-       within and across regions. Receivers fetch
-       from nearest nodes.
+       Commitment nodes store ENCRYPTED shards and
+       replicate within and across regions. Receivers
+       fetch from nearest nodes. Nodes cannot read
+       shard content (ciphertext only).
 ```
 
 ---
@@ -200,31 +221,40 @@ The receiver-side component that reconstructs entities.
    │                             │                          │
    │  1. Compute EntityID        │                          │
    │  2. Erasure encode → shards │                          │
-   │  3. Distribute shards ─────▶│                          │
-   │                             │  (shards stored on       │
-   │  4. Write commitment ──────▶│   commitment nodes)      │
-   │     record to log           │                          │
-   │                             │  (record appended        │
-   │  5. Generate entanglement   │   to immutable log)      │
-   │     key for receiver        │                          │
+   │  3. Generate CEK (random)   │                          │
+   │  4. AEAD encrypt each shard │                          │
+   │  5. Distribute encrypted ──▶│                          │
+   │     shards to nodes         │  (ciphertext stored on   │
+   │                             │   nodes by (eid, index)) │
+   │  6. Write commitment ──────▶│                          │
+   │     record to log           │  (Merkle root only,      │
+   │     (NO shard_ids)          │   no shard_ids)          │
    │                             │                          │
-   │  6. Send entanglement key ──────────────────────────▶ │
-   │     (~512 bytes)            │                          │
+   │  7. Generate entanglement   │                          │
+   │     key (entity_id + CEK    │                          │
+   │     + ref + policy)         │                          │
+   │  8. Seal key to receiver ──────────────────────────▶  │
+   │     (~240 bytes, opaque)    │                          │
    │                             │                          │
-   │  ✓ Sender done.             │          7. Unseal key   │
-   │    Can go offline.          │          8. Fetch record  │
-   │                             │◀──────── 9. Verify record│
+   │  ✓ Sender done.             │          9. Unseal key   │
+   │    Can go offline.          │             (private key) │
+   │                             │         10. Extract CEK   │
+   │                             │◀──────  11. Fetch record  │
+   │                             │         12. Verify record │
    │                             │                          │
-   │                             │◀────── 10. Fetch k shards│
-   │                             │──────▶   (parallel,      │
-   │                             │           nearest nodes)  │
+   │                             │         13. Derive shard  │
+   │                             │             locations     │
+   │                             │◀──────  14. Fetch k       │
+   │                             │──────▶      encrypted     │
+   │                             │             shards        │
    │                             │                          │
-   │                             │       11. Verify shards   │
-   │                             │       12. Erasure decode  │
-   │                             │       13. Verify entity   │
+   │                             │         15. AEAD decrypt  │
+   │                             │             with CEK      │
+   │                             │         16. Erasure decode│
+   │                             │         17. Verify entity │
    │                             │                          │
-   │                             │       ✓ ENTITY            │
-   │                             │         MATERIALIZED      │
+   │                             │         ✓ ENTITY          │
+   │                             │           MATERIALIZED    │
 ```
 
 ---
@@ -233,36 +263,59 @@ The receiver-side component that reconstructs entities.
 
 ```
 ┌──────────────────────────────────────────────────┐
-│                 SECURITY STACK                     │
+│              SECURITY STACK (v2)                    │
 │                                                    │
-│  Layer 5: ACCESS POLICY                            │
+│  Layer 6: ACCESS POLICY                            │
 │  ├── One-time materialization                      │
 │  ├── Time-bounded access                           │
 │  ├── Delegatable permissions                       │
 │  └── Revocable entanglement                        │
 │                                                    │
-│  Layer 4: ZERO-KNOWLEDGE (Optional)                │
-│  ├── ZK-proofs on commitment records               │
-│  ├── Encrypted shards (nodes can't read)           │
-│  └── Verifiable computation on hidden data         │
+│  Layer 5: SEALED ENVELOPE (NEW)                    │
+│  ├── Entire key encrypted to receiver's pubkey     │
+│  ├── Ephemeral randomness per seal (forward secrecy)│
+│  ├── Zero metadata leakage on interception         │
+│  └── Receiver identity verified during unseal      │
 │                                                    │
-│  Layer 3: FORWARD SECRECY                          │
-│  ├── Ephemeral X25519 key agreement                │
-│  ├── Per-transfer encryption keys                  │
-│  └── No long-term key compromise exposure          │
+│  Layer 4: SHARD ENCRYPTION (NEW)                   │
+│  ├── AEAD encryption with random 256-bit CEK       │
+│  ├── Per-shard nonce (shard_index)                 │
+│  ├── Nodes store ciphertext only (can't read)      │
+│  ├── Authenticated: tampering detected before use  │
+│  └── CEK exists only inside sealed entanglement key│
+│                                                    │
+│  Layer 3: ZERO-KNOWLEDGE (Optional)                │
+│  ├── ZK-proofs on commitment records               │
+│  └── Verifiable computation on hidden data         │
 │                                                    │
 │  Layer 2: CRYPTOGRAPHIC INTEGRITY                  │
 │  ├── Content-addressed entities (BLAKE3)           │
-│  ├── Content-addressed shards (BLAKE3)             │
+│  ├── Merkle root over encrypted shard hashes       │
 │  ├── Ed25519 signatures on commitments             │
-│  └── Merkle tree over shard set                    │
+│  └── AEAD tags on each shard (32 bytes)            │
 │                                                    │
 │  Layer 1: INFORMATION-THEORETIC SECURITY           │
 │  ├── Erasure coding (k-of-n threshold)             │
-│  ├── Shard compromise < k reveals nothing          │
+│  ├── < k shards (even decrypted) reveal nothing    │
 │  └── Distributed across independent nodes          │
 │                                                    │
 └──────────────────────────────────────────────────┘
+```
+
+### Attack Surface Closure (v1 → v2)
+
+```
+  LEAK 1: Entanglement Key (in transit)
+  v1: ✗ Plaintext JSON with shard_ids, encoding params, sender_id
+  v2: ✓ Sealed envelope — opaque ciphertext, zero metadata
+
+  LEAK 2: Commitment Log (at rest)
+  v1: ✗ Listed all shard_ids in plaintext
+  v2: ✓ Merkle root only — hashes of ciphertext, no individual IDs
+
+  LEAK 3: Commitment Nodes (at rest)
+  v1: ✗ Stored plaintext shards, served to anyone
+  v2: ✓ AEAD-encrypted ciphertext — useless without CEK
 ```
 
 ---
@@ -271,11 +324,13 @@ The receiver-side component that reconstructs entities.
 
 | Stage | Data Size | Who Performs | Network Cost |
 |-------|-----------|-------------|-------------|
-| Entity → Shards | O(entity) | Sender | None (local) |
-| Shards → Nodes | O(entity × replication) | Sender → Network | Amortized, async |
-| Commitment Record | O(1) ~1KB | Sender → Log | Minimal |
-| Entanglement Key | O(1) ~512B | Sender → Receiver | **Near zero** |
-| Shards → Entity | O(entity) | Network → Receiver | Local fetches |
+| Entity → Shards | O(entity) | Sender (local) | None |
+| Shards → Encrypted Shards | O(entity) + O(n×32) tags | Sender (local) | None |
+| Encrypted Shards → Nodes | O(entity × replication) | Sender → Network | Amortized, async |
+| Commitment Record | O(1) ~512B | Sender → Log | Minimal |
+| **Entanglement Key** | **O(1) ~240B sealed** | **Sender → Receiver** | **Near zero** |
+| Encrypted Shards → Receiver | O(entity) | Network → Receiver | Local fetches |
+| Decrypt + Decode | O(entity) | Receiver (local) | None |
 
 **Critical insight**: The sender-to-receiver path carries O(1) data. The O(entity) work
 happens between sender↔network and network↔receiver, where "network" means **nearby nodes**.
