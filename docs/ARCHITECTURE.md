@@ -332,8 +332,14 @@ The Entity Engine is the sender-side component that prepares entities for commit
 | Encrypted Shards → Receiver | O(entity) | Network → Receiver | Local fetches |
 | Decrypt + Decode | O(entity) | Receiver (local) | None |
 
-**Critical insight**: The sender-to-receiver path carries O(1) data. The O(entity) work
-happens between sender↔network and network↔receiver, where "network" means **nearby nodes**.
+**Critical insight**: The sender-to-receiver direct path carries O(1) data. The O(entity)
+work happens between sender↔network (commit phase) and network↔receiver (materialize phase),
+where "network" means **nearby commitment nodes**.
+
+**Honest cost accounting**: Total system bandwidth is O(entity × replication_factor) + O(entity),
+which is strictly greater than direct transfer's O(entity). The advantage is *not* bandwidth
+reduction — it is bottleneck relocation: replacing one long-haul O(entity) transfer with
+parallel local O(entity/k) fetches, plus amortized fan-out to multiple receivers.
 
 ---
 

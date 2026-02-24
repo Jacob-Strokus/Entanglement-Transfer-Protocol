@@ -14,10 +14,10 @@ entity to a distributed commitment layer, transmits a minimal cryptographic **en
 to the receiver, and the receiver **materializes** the entity through deterministic reconstruction
 from distributed shards. The protocol achieves:
 
-- **Sub-latency transfer** — the entanglement key is orders of magnitude smaller than the entity
+- **Decoupled transfer** — the sender→receiver path carries only a ~240-byte sealed key, independent of entity size. Total system bandwidth is O(entity × replication), but the direct-path bottleneck is eliminated.
 - **Immutability by design** — every transfer is a permanent, auditable commitment
 - **Security without trust** — verification is mathematical, not institutional
-- **Geography-independence** — materialization draws from the nearest available shards
+- **Geography-optimized materialization** — the receiver fetches shards from the nearest available nodes, converting a long-haul transfer into parallel local fetches
 
 ---
 
@@ -164,8 +164,12 @@ The entanglement key is:
 The entanglement key is **not the data**. It is the **proof of right to reconstruct**. This
 creates several remarkable properties:
 
-1. **Size invariance**: Transferring 1 KB and transferring 1 TB produce the same size
-   sealed entanglement key (~240 bytes). The sender→receiver transmission is O(1).
+1. **Sender→receiver decoupling**: Transferring 1 KB and transferring 1 TB produce the same
+   size sealed entanglement key (~240 bytes). The sender→receiver direct transmission is O(1).
+   Note: total system bandwidth is O(entity × replication) across the commit and materialize
+   phases. The advantage is not bandwidth elimination — it is *bottleneck relocation*: the
+   sender-receiver path (often the slowest link) is reduced to a constant, and the O(entity)
+   work shifts to the receiver↔network path, which can be geographically optimized.
 
 2. **Three-layer interception resistance**: An attacker faces three independent barriers:
    - **Layer 1 (Sealed envelope)**: The key is encrypted to the receiver's public key;
@@ -211,20 +215,30 @@ Traditional transfer: **move all the data across one path (sender → receiver)*
 ETP materialization: **pull k shards in parallel from the nearest nodes in the commitment network**
 
 ```
-Traditional:    S ═══════════════════════════════════> R
-                       (entire payload, one path)
+Traditional:    S ════════════════(entire payload)════════════════> R
+                  Bottleneck: sender upload × distance to receiver
 
-ETP:            S ──(512 bytes)──> R
-                                   R <── shard from Node nearby
-                                   R <── shard from Node nearby
-                                   R <── shard from Node nearby
-                                   R <── shard from Node nearby
-                                   ...k shards, parallel, nearest-first
+ETP:            S ──(~240B sealed key)──> R
+                                          R <── encrypted shard from nearby Node
+                                          R <── encrypted shard from nearby Node
+                                          R <── encrypted shard from nearby Node
+                                          R <── encrypted shard from nearby Node
+                                          ...k shards, parallel, nearest-first
 ```
 
-The bottleneck is no longer the sender's upload speed or the sender-receiver distance.
-The bottleneck is the receiver's ability to pull shards from the **nearest commitment nodes**,
-which can be geographically local.
+**Important nuance:** The total bytes moved across the system is *greater* than direct
+transfer — the commit phase uploads O(entity × replication_factor) to the network, and the
+materialize phase downloads O(entity) from it. ETP does not eliminate bandwidth; it
+**relocates the bottleneck**:
+
+- The sender→receiver path (often the slowest, highest-latency link) shrinks to O(1)
+- The O(entity) work shifts to receiver↔nearby-nodes, which can be geographically local
+- The commit-phase bandwidth is amortized: committed once, materialized by many receivers
+
+The win is not "less bandwidth" — it is **faster perceived transfer** via parallelism,
+geographic locality, and sender-independence. For fan-out scenarios (one sender, many
+receivers), the amortized cost approaches O(entity) total regardless of receiver count,
+whereas direct transfer costs O(entity × receiver_count).
 
 ---
 
@@ -304,21 +318,42 @@ actually "appending a new version." The full history is always auditable.
 ### 5.1 Latency
 
 **Traditional**: Latency = f(distance, hops, payload_size)  
-**ETP**: Latency = f(entanglement_key_transmission) + f(nearest_shard_fetch)
+**ETP**: Latency = f(key_transmission) + f(nearest_shard_fetch)
 
-Since the entanglement key is ~512 bytes, its transmission is near-instantaneous on any network.
-Shard fetching is parallelized from the nearest nodes. Effective latency approaches the **local
-network latency** of the commitment network, regardless of where the sender is.
+The sealed entanglement key is ~240 bytes — its transmission is near-instantaneous on any
+network. Shard fetching is parallelized from the nearest nodes.
+
+**What this means precisely:**
+- The sender→receiver latency is reduced to O(1) (the key is constant-size)
+- The materialization latency depends on the receiver's proximity to commitment nodes
+- If commitment nodes exist near the receiver, effective latency approaches local RTT
+- If no nearby nodes exist, shard fetching still incurs geographic latency
+
+**What this does NOT mean:** Total time is not "near-instantaneous" for large entities.
+The receiver still downloads O(entity) bytes of encrypted shards. The advantage is that
+this download is from *nearby nodes* in parallel, not from a distant sender over a single
+path.
 
 ### 5.2 Geographic Distance
 
-**Traditional**: New York → Tokyo = ~200ms minimum (speed of light through fiber)  
-**ETP**: If commitment nodes exist near Tokyo, shards are fetched locally. The sender in New York
-transmits only a 512-byte entanglement key. The receiver in Tokyo materializes from local shards.
+**Traditional**: New York → Tokyo = ~200ms RTT minimum (speed of light through fiber).  
+For a 1 GB file at 100 Mbps effective throughput: ~80 seconds, bottlenecked by the single path.
 
-The geographic cost is paid **once** when shards are distributed to the commitment network (and
-this happens asynchronously). Subsequent transfers to any receiver anywhere effectively have
-**local latency**.
+**ETP**: The sender in New York transmits a ~240-byte sealed key to the receiver in Tokyo
+(one round trip, ~200ms). The receiver then fetches k encrypted shards in parallel from
+Tokyo-local commitment nodes (~5-10ms RTT each). Materialization time is dominated by
+*local bandwidth*, not transoceanic latency.
+
+The geographic cost is paid **once** when shards are distributed to the commitment network
+during the commit phase (this happens asynchronously, before any receiver is involved).
+Subsequent materializations by any receiver anywhere draw from *nearby nodes*.
+
+**Honest tradeoff:** The commit phase requires distributing O(entity × replication) bytes
+across the global network. For a single sender → single receiver transfer, total system
+bandwidth is higher than direct transfer. The advantage appears in:
+- **Fan-out:** one commit, many receivers — amortized cost per receiver approaches zero
+- **Latency:** receiver-local fetches vs. sender-distance fetches
+- **Sender-independence:** sender can go offline after commit
 
 ### 5.3 Computing Power
 
@@ -327,6 +362,63 @@ decrypt, decompress, and deserialize. Both need sufficient compute.
 **ETP**: The heavy work (erasure encoding, shard distribution) is done once at commit time and
 can be offloaded to the commitment network. Materialization (erasure decoding from k shards) is
 computationally lightweight and highly parallelizable.
+
+### 5.4 Formal Cost Model
+
+Let:
+- $D$ = entity size in bytes
+- $n$ = total shards, $k$ = reconstruction threshold
+- $r$ = replication factor per shard
+- $N$ = number of receivers
+- $L_{SR}$ = latency between sender and receiver
+- $L_{RN}$ = latency between receiver and nearest commitment node
+
+**Bandwidth costs:**
+
+| Metric | Direct Transfer | ETP |
+|--------|----------------|-----|
+| Sender upload (per transfer) | $D$ | — (already committed) |
+| Sender upload (commit, once) | — | $D \cdot r$ |
+| Sender→receiver direct | $D$ | $O(1)$ (~240 bytes) |
+| Receiver download | $D$ | $D$ (k shards × $D/k$) |
+| **Total system, 1 receiver** | $D$ | $D \cdot r + D \approx D(r+1)$ |
+| **Total system, N receivers** | $D \cdot N$ | $D \cdot r + D \cdot N$ |
+| **Amortized per receiver (N large)** | $D$ | $\approx D$ |
+
+**Key formula — total system bandwidth:**
+
+$$B_{ETP}(N) = D \cdot r + D \cdot N$$
+$$B_{direct}(N) = D \cdot N$$
+
+For $N = 1$: $B_{ETP} = D(r+1) > D = B_{direct}$. **ETP is strictly worse for single-transfer bandwidth.**
+
+For $N > r$: $B_{ETP} \approx D \cdot N \approx B_{direct}$. **ETP amortizes to parity.**
+
+For large $N$: The commit cost $D \cdot r$ becomes negligible. Each additional receiver costs only
+$D$ (local shard fetches) + ~240 bytes (sealed key). Sender bandwidth is constant after commit.
+
+**Latency costs:**
+
+$$T_{direct} = L_{SR} + \frac{D}{\text{bandwidth}_{SR}}$$
+
+$$T_{ETP} = \underbrace{\frac{240}{\text{bandwidth}_{SR}}}_{\text{key (negligible)}} + \underbrace{\frac{D/k}{\text{bandwidth}_{RN}}}_{\text{k parallel shard fetches}}$$
+
+When $\text{bandwidth}_{RN} \gg \text{bandwidth}_{SR}$ (receiver is near commitment nodes but far from
+sender), $T_{ETP} \ll T_{direct}$. This is the latency advantage.
+
+When $\text{bandwidth}_{RN} \approx \text{bandwidth}_{SR}$ (everything is equidistant), $T_{ETP} \approx T_{direct}$
+but with the sender free to go offline.
+
+**Where ETP wins honestly:**
+1. Fan-out: $N$ receivers for near-constant sender cost
+2. Latency: receiver-local fetches vs. sender-distance fetches
+3. Sender-independence: sender contributes zero bandwidth after commit
+4. Availability: shards survive sender going offline
+
+**Where ETP loses honestly:**
+1. Single-transfer bandwidth: $r+1$ times worse than direct
+2. Storage: the commitment network stores $D \cdot r$ bytes persistently
+3. Complexity: three-phase protocol vs. one-phase direct send
 
 ---
 
@@ -337,7 +429,7 @@ computationally lightweight and highly parallelizable.
 | Payload travels sender→receiver | Yes | Partial | No (ledger only) | Partial | **No** |
 | Content-addressed | No | Yes | Yes | Partial | **Yes** |
 | Immutable | No | Yes | Yes | No | **Yes** |
-| Size-invariant transfer | No | No | N/A | No | **Yes** |
+| Sender→receiver path O(1) | No | No | N/A | No | **Yes** |
 | Built-in access control | No | No | Partial | No | **Yes** |
 | Forward secrecy | TLS layer | No | No | No | **Yes** |
 | ZK privacy mode | No | No | Some chains | No | **Yes** |
@@ -348,10 +440,12 @@ computationally lightweight and highly parallelizable.
 
 ## 7. Use Cases
 
-### 7.1 Instant Large File Transfer
-A 50 GB dataset is committed once. Any number of receivers can materialize it instantly by
-receiving a 512-byte entanglement key. The "transfer" time for each receiver is dominated by
-local shard fetching, not by the sender's bandwidth.
+### 7.1 Large File Fan-Out
+A 50 GB dataset is committed once. Any number of receivers can materialize it by each receiving
+a ~240-byte sealed entanglement key. Each receiver's materialization time is dominated by local
+shard fetching from nearby nodes — not by the sender's bandwidth or availability. For N
+receivers, direct transfer costs O(50GB × N). ETP costs O(50GB × replication) for the commit
+plus O(~240B × N) for the keys — amortized cost per receiver approaches zero as N grows.
 
 ### 7.2 Immutable Audit Trail
 Every data transfer is permanently recorded. A compliance system can verify: "Entity X was
@@ -369,9 +463,12 @@ shards are fetched locally, and only the delta (new entity) needs materializatio
 
 ### 7.5 Cross-Planetary Data Transfer
 On a Mars colony with 4-24 minute light delay to Earth: commitment nodes on Mars cache shards.
-A sender on Earth commits an entity. The 512-byte entanglement key crosses the void once. The
-receiver on Mars materializes from Mars-local commitment nodes (which replicate shards during
-off-peak periods). Effective perceived transfer time: near-instantaneous.
+A sender on Earth commits an entity. The ~240-byte sealed entanglement key crosses the void
+once (4-24 minutes). The receiver on Mars materializes from Mars-local commitment nodes (which
+replicate shards during off-peak periods). Materialization time is bounded by Mars-local network
+speed, not Earth-Mars light delay. Note: initial shard replication to Mars nodes still incurs
+the light-delay cost — the advantage is that this is amortized across all Mars-side receivers
+and can happen asynchronously before any specific transfer.
 
 ---
 
@@ -395,13 +492,16 @@ ETP inverts the data transfer paradigm. Rather than asking "how do I send this d
 asks "how do I prove this data exists, and give you the right to reconstruct it near you."
 
 The result is a protocol where:
-- **Transfer size is constant** regardless of entity size
+- **The sender→receiver path is O(1)** — a constant-size sealed key, regardless of entity size
+- **Total system bandwidth is higher than direct transfer** — but the bottleneck shifts from
+  the sender-receiver link to receiver-local fetches, with amortized fan-out
 - **Transfer is immutable** by mathematical construction, not policy
 - **Security is cryptographic** not perimeter-based
-- **Geography is irrelevant** because materialization is local
+- **Geography is optimized** because materialization pulls from nearby nodes
 - **The sender can go offline** after commitment without affecting the transfer
 
 Data doesn't move. Proof moves. Truth materializes.
+Bandwidth doesn't disappear. It redistributes to where it's cheapest.
 
 ---
 
