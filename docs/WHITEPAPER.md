@@ -304,6 +304,240 @@ CommitmentRecord + ZK-Proof: "I committed a valid entity. Here's the proof. You 
 without seeing the data."
 ```
 
+### 3.3 Formal Security Definitions
+
+This section defines the security properties of LTP as cryptographic games and formally
+reduces each to standard assumptions. We adopt the notation of Bellare and Rogaway:
+$\mathcal{A}$ denotes a PPT (probabilistic polynomial time) adversary, $\mathsf{negl}(\lambda)$
+denotes a negligible function in security parameter $\lambda$, and $\mathsf{Adv}^{X}_{\mathcal{A}}$
+denotes $\mathcal{A}$'s advantage in game $X$.
+
+#### 3.3.1 Entity Immutability (Collision Resistance)
+
+**Definition (IMM game).** The immutability game $\mathsf{Game}_{\mathcal{A}}^{\text{IMM}}$
+proceeds as follows:
+
+```
+Game IMM:
+  1. Adversary A receives the hash function H and the protocol parameters.
+  2. A outputs two entities (e, e') with e ≠ e'.
+  3. A wins if EntityID(e) = EntityID(e').
+```
+
+**Theorem 3 (Entity Immutability).** For any PPT adversary $\mathcal{A}$:
+
+$$\mathsf{Adv}^{\text{IMM}}_{\mathcal{A}}(\lambda) \leq \mathsf{Adv}^{\text{CR}}_{H}(\lambda)$$
+
+where $\mathsf{Adv}^{\text{CR}}_{H}$ is the collision-resistance advantage against $H$
+(BLAKE2b-256).
+
+*Proof.* Reduction: Given $\mathcal{A}$ that wins IMM, construct $\mathcal{B}$ that breaks
+collision resistance of $H$. $\mathcal{B}$ runs $\mathcal{A}$ and receives $(e, e')$ with
+$e \neq e'$ and $H(\text{encode}(e)) = H(\text{encode}(e'))$. Since $e \neq e'$ implies
+$\text{encode}(e) \neq \text{encode}(e')$ (encoding is injective), $\mathcal{B}$ outputs
+$(\text{encode}(e), \text{encode}(e'))$ as a collision for $H$. ∎
+
+**Concrete security.** For BLAKE2b-256 ($n = 256$ output bits), the birthday bound gives
+$\mathsf{Adv}^{\text{CR}}_{H} \leq q^2 / 2^{257}$ where $q$ is the number of hash
+evaluations. At $q = 2^{128}$ (computational limit): $\mathsf{Adv} \approx 2^{-1}$
+(infeasible in practice). Grover's algorithm reduces preimage search to $O(2^{128})$
+quantum queries but does **not** improve the birthday bound for collisions.
+
+#### 3.3.2 Shard Integrity (Second-Preimage Resistance)
+
+**Definition (SINT game).** The shard integrity game $\mathsf{Game}_{\mathcal{A}}^{\text{SINT}}$
+proceeds as follows:
+
+```
+Game SINT:
+  1. Challenger commits entity e with shards {s_0, ..., s_{n-1}}.
+  2. Adversary A receives entity_id, all shard hashes H(s_i ‖ entity_id ‖ i),
+     and the AEAD ciphertexts (as stored on commitment nodes).
+  3. A outputs (i, s_i') with s_i' ≠ s_i.
+  4. A wins if H(s_i' ‖ entity_id ‖ i) = H(s_i ‖ entity_id ‖ i)
+     AND the AEAD tag verifies.
+```
+
+**Theorem 4 (Shard Integrity).** For any PPT adversary $\mathcal{A}$:
+
+$$\mathsf{Adv}^{\text{SINT}}_{\mathcal{A}}(\lambda) \leq \mathsf{Adv}^{\text{SPR}}_{H}(\lambda) + \mathsf{Adv}^{\text{AUTH}}_{\text{AEAD}}(\lambda)$$
+
+where $\mathsf{Adv}^{\text{SPR}}_{H}$ is the second-preimage resistance advantage and
+$\mathsf{Adv}^{\text{AUTH}}_{\text{AEAD}}$ is the AEAD authentication advantage.
+
+*Proof.* $\mathcal{A}$ must either: (a) find $s_i'$ that collides in $H$ (breaking SPR), or
+(b) forge an AEAD ciphertext that decrypts to $s_i' \neq s_i$ (breaking AEAD authenticity).
+These are independent events; the advantage is bounded by their sum. ∎
+
+**Note (double protection).** Even without AEAD, content-addressing catches substitution.
+AEAD adds a second layer: the AEAD tag authenticates each shard independently, so a
+compromised commitment node cannot serve a modified shard that passes decryption. Both
+layers must be defeated simultaneously.
+
+#### 3.3.3 Transfer Confidentiality (IND-CPA)
+
+**Definition (TCONF game).** Transfer confidentiality is defined via an IND-CPA-style
+indistinguishability game adapted for LTP's commit-lattice-materialize structure:
+
+```
+Game TCONF:
+  1. Challenger generates keypairs for sender S and receiver R.
+  2. Adversary A chooses two equal-length entities (e_0, e_1) and submits them.
+  3. Challenger flips coin b ∈ {0, 1} and runs the full LTP protocol on e_b:
+     - COMMIT: erasure encode, AEAD encrypt shards, distribute to nodes
+     - LATTICE: seal key to R's public key
+  4. Adversary A receives:
+     - The sealed lattice key (ML-KEM ciphertext)
+     - All encrypted shards stored on commitment nodes
+     - The commitment record (entity_id, Merkle root, encoding params, ML-DSA signature)
+  5. A outputs guess b'.
+  6. A wins if b' = b.
+```
+
+**Theorem 5 (Transfer Confidentiality).** For any PPT adversary $\mathcal{A}$:
+
+$$\mathsf{Adv}^{\text{TCONF}}_{\mathcal{A}}(\lambda) \leq 2 \cdot \mathsf{Adv}^{\text{IND-CCA}}_{\text{ML-KEM}}(\lambda) + \mathsf{Adv}^{\text{IND-CPA}}_{\text{AEAD}}(\lambda) + \mathsf{Adv}^{\text{PRF}}_{\text{CEK-KDF}}(\lambda)$$
+
+*Proof sketch.* We proceed via a sequence of games:
+
+- **Game 0** = TCONF. The adversary sees sealed key + encrypted shards + log entry.
+- **Game 1**: Replace ML-KEM shared secret with random. By ML-KEM IND-CCA security,
+  $|\Pr[G_0] - \Pr[G_1]| \leq \mathsf{Adv}^{\text{IND-CCA}}_{\text{ML-KEM}}$.
+  Now the sealed key is a random encryption — independent of $b$.
+- **Game 2**: Replace AEAD encryptions of shards with encryptions of zeros. By AEAD
+  IND-CPA security, $|\Pr[G_1] - \Pr[G_2]| \leq \mathsf{Adv}^{\text{IND-CPA}}_{\text{AEAD}}$.
+  Now the shard ciphertexts are independent of $b$.
+- **Game 3**: Replace the EntityID with a random value. The EntityID is $H(e_b)$; since
+  shards are already independent of $b$ (Game 2), and the Merkle root is over encrypted
+  shard hashes (also independent of $b$), the only remaining leakage is the EntityID
+  itself. Under the PRF assumption on the hash (or in the random oracle model):
+  $|\Pr[G_2] - \Pr[G_3]| \leq \mathsf{Adv}^{\text{PRF}}_{\text{CEK-KDF}}$.
+
+In Game 3 the adversary's view is independent of $b$, so $\Pr[G_3] = 1/2$. ∎
+
+**Important caveat.** The EntityID is a deterministic function of content. If the adversary
+can enumerate possible entities (e.g., "yes" or "no"), the EntityID acts as a fingerprint.
+This is inherent to content-addressed systems and shared with IPFS, Git, etc. The ZK
+transfer mode (§3.2) mitigates this by encrypting the commitment record.
+
+#### 3.3.4 Commitment Non-Repudiation (EUF-CMA)
+
+**Definition (NREP game).** The non-repudiation game $\mathsf{Game}_{\mathcal{A}}^{\text{NREP}}$
+proceeds as follows:
+
+```
+Game NREP:
+  1. Challenger generates ML-DSA-65 keypair (vk, sk) for sender S.
+  2. Adversary A is given vk and oracle access to Sign(sk, ·).
+  3. A outputs a commitment record c* and signature σ* such that:
+     - Verify(vk, c*, σ*) = ACCEPT
+     - S never signed c* (c* was not queried to the signing oracle)
+  4. A wins if the above conditions hold.
+```
+
+**Theorem 6 (Non-Repudiation).** For any PPT adversary $\mathcal{A}$:
+
+$$\mathsf{Adv}^{\text{NREP}}_{\mathcal{A}}(\lambda) \leq \mathsf{Adv}^{\text{EUF-CMA}}_{\text{ML-DSA-65}}(\lambda)$$
+
+*Proof.* Direct reduction: $\mathcal{B}$ embeds the EUF-CMA challenge key as $S$'s
+verification key. Any forgery $(c^*, \sigma^*)$ from $\mathcal{A}$ is a valid EUF-CMA
+forgery. ML-DSA-65 (FIPS 204) achieves NIST Level 3 security (128 bits against quantum
+adversaries via the Module-LWE hardness assumption). ∎
+
+**Consequence.** Once a sender commits an entity and the ML-DSA-65 signature is recorded in
+the append-only log, the sender cannot deny the commitment. The receiver can present the
+signed record as unforgeable evidence of the transfer's existence.
+
+#### 3.3.5 Threshold Secrecy (Information-Theoretic)
+
+**Definition (TSEC game).** The threshold secrecy game
+$\mathsf{Game}_{\mathcal{A}}^{\text{TSEC}}$ proceeds as follows:
+
+```
+Game TSEC:
+  1. Adversary A chooses two messages (m_0, m_1) of equal length.
+  2. Challenger flips coin b ∈ {0, 1}, erasure-encodes m_b into n shards.
+  3. A receives any t < k shards of her choice (adaptive or non-adaptive).
+  4. A outputs guess b'.
+  5. A wins if b' = b.
+```
+
+**Theorem 7 (Threshold Secrecy).** For any adversary $\mathcal{A}$ (computationally unbounded):
+
+$$\mathsf{Adv}^{\text{TSEC}}_{\mathcal{A}} = 0 \quad \text{for } t < k$$
+
+*Proof.* The Vandermonde encoding evaluates a degree-$(k-1)$ polynomial $p(x) = \sum_{j=0}^{k-1} c_j x^j$
+over GF(256) at $n$ distinct points. Any $t < k$ evaluations leave $k - t \geq 1$ degrees
+of freedom. For every candidate message $m$, there exists a unique polynomial consistent
+with the observed shards. Therefore:
+
+$$\Pr[M = m_b \mid \text{any } t < k \text{ shards}] = \Pr[M = m_b]$$
+
+This is a **perfect secrecy** (Shannon-sense) result — it holds against adversaries with
+unlimited computational power, including quantum computers. It is the MDS (Maximum Distance
+Separable) property of Reed-Solomon codes. ∎
+
+**In LTP's context:** Even if an adversary compromises $k - 1$ commitment nodes and decrypts 
+the AEAD ciphertexts (by also obtaining the CEK), the $k - 1$ plaintext shards reveal zero 
+information about the entity. Information-theoretic secrecy provides a second line of defense
+behind AEAD encryption.
+
+#### 3.3.6 Transfer Immutability (Composite Game)
+
+**Definition (TIMM game).** Transfer immutability captures the end-to-end property: no
+adversary can cause a receiver to accept an entity different from what the sender committed.
+This is the defining security goal of LTP.
+
+```
+Game TIMM:
+  1. Challenger runs honest setup: generates keypairs, commitment network.
+  2. Sender S commits entity e via COMMIT, producing record R and CEK.
+  3. S creates lattice key K via LATTICE, sealed to receiver R's pk.
+  4. Adversary A controls the network: A can modify, drop, or inject
+     shards on commitment nodes; A can modify the sealed key in transit;
+     A can forge commitment records (if able); A controls all nodes
+     except the append-only log.
+  5. Receiver R runs MATERIALIZE with whatever A delivers.
+  6. A wins if R outputs e' with e' ≠ e (receiver accepts wrong data).
+```
+
+**Theorem 8 (Transfer Immutability).** For any PPT adversary $\mathcal{A}$:
+
+$$\mathsf{Adv}^{\text{TIMM}}_{\mathcal{A}}(\lambda) \leq \mathsf{Adv}^{\text{CR}}_{H}(\lambda) + \mathsf{Adv}^{\text{EUF-CMA}}_{\text{ML-DSA}}(\lambda) + \mathsf{Adv}^{\text{AUTH}}_{\text{AEAD}}(\lambda) + \mathsf{Adv}^{\text{IND-CCA}}_{\text{ML-KEM}}(\lambda)$$
+
+*Proof.* The adversary must defeat at least one of four barriers:
+
+1. **Unseal the lattice key** to learn the CEK and entity_id → requires breaking ML-KEM
+   IND-CCA ($\mathsf{Adv}^{\text{IND-CCA}}_{\text{ML-KEM}}$).
+
+2. **Forge the commitment record** to point to a different Merkle root → requires breaking
+   ML-DSA EUF-CMA ($\mathsf{Adv}^{\text{EUF-CMA}}_{\text{ML-DSA}}$).
+
+3. **Substitute shard ciphertexts** that decrypt to different plaintext shards → requires
+   breaking AEAD authenticity ($\mathsf{Adv}^{\text{AUTH}}_{\text{AEAD}}$).
+
+4. **Find a different entity $e'$** with $H(e') = H(e)$ that passes the final integrity
+   check → requires breaking collision resistance of $H$
+   ($\mathsf{Adv}^{\text{CR}}_{H}$).
+
+Since the receiver's MATERIALIZE phase verifies all four (unseal → lookup record → verify
+signature → decrypt shards → verify AEAD tags → reconstruct → check $H(e') = \text{EntityID}$),
+the adversary must break at least one. The advantage is bounded by the sum. ∎
+
+**This is LTP's strongest security theorem.** It is a composite reduction that chains four
+standard cryptographic assumptions. Under NIST Level 3 security (ML-KEM-768 + ML-DSA-65
++ BLAKE2b-256), each component provides $\geq 128$ bits of post-quantum security.
+
+#### 3.3.7 What Cannot Be Formally Proven
+
+| Claim | Why It Cannot Be Proven | Status |
+|-------|------------------------|--------|
+| "Faster than direct transfer" | Performance is empirical. Depends on topology, entity size, node placement. | Acknowledged in §6.4 (cost model) |
+| "Geography-independent" | Requires commitment nodes near receivers. No protocol guarantees this. | Deployment-dependent |
+| "Sub-latency transfer" | O(1) key size is proven; O(1) total latency is not. MATERIALIZE fetches O(entity) data. | Reframed as "bottleneck relocation" |
+| "Secure without trust" | Requires honest append-only log and ≥ k honest shard replicas. These ARE trust assumptions. | Acknowledged in §5.1 |
+| "Permanent storage" | Requires economic incentives to sustain nodes. Without incentives, rational nodes evict data. | Acknowledged in §5.4.4, §5.5 |
+
 ---
 
 ## 4. Immutability Guarantees

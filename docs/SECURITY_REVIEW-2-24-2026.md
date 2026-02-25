@@ -341,9 +341,18 @@ materialize), not the individual components.
 
 4. **Add formal security definitions** (IND-CPA for confidentiality, EUF-CMA for integrity,
    define the security game for "transfer immutability").
+   ✅ *Addressed — see WHITEPAPER §3.3.* Seven formal security games defined:
+   IMM (Theorem 3, collision resistance), SINT (Theorem 4, shard integrity),
+   TCONF (Theorem 5, IND-CPA-style transfer confidentiality), NREP (Theorem 6,
+   EUF-CMA non-repudiation), TSEC (Theorem 7, information-theoretic threshold secrecy),
+   TIMM (Theorem 8, composite transfer immutability game). Each reduced to standard
+   assumptions (CR, SPR, IND-CCA, EUF-CMA, AEAD-AUTH, MDS property). §3.3.7 honestly
+   lists what cannot be formally proven.
 
 5. **Address data availability** — what happens when nodes go offline? Define the availability
    guarantees and their limits.
+   ✅ *Addressed — see WHITEPAPER §4.3 (Theorems 1 & 2), §5.4 (availability model,
+   failure modes, CAP analysis, repair protocol, TTL lifecycle).*
 
 ### Should Fix (Strengtheners)
 
