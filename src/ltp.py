@@ -551,14 +551,57 @@ class ShardEncryptor:
 
 class ErasureCoder:
     """
-    Simplified erasure coding for proof of concept.
+    Erasure coding with true any-k-of-n reconstruction.
 
-    Splits data into k chunks, produces n shards (n-k parity).
-    Any k data shards can reconstruct the original.
+    Uses a Vandermonde-matrix approach over GF(256) to produce n shards from
+    data split into k chunks, where ANY k of the n shards are sufficient to
+    reconstruct the original data. This is the core availability guarantee.
 
-    NOTE: Production would use Reed-Solomon over GF(2^8) for true
-    any-k-of-n reconstruction from arbitrary shards.
+    GF(256) arithmetic uses the irreducible polynomial x^8 + x^4 + x^3 + x^2 + 1
+    (0x11D), for which 2 (i.e., 'x') is a primitive root of order 255. This is
+    the standard polynomial used in Reed-Solomon coding (QR codes, DVB, CCSDS).
+
+    NOTE: Production would use an optimized Reed-Solomon library (e.g., zfec,
+    liberasurecode) for performance. This implementation prioritizes correctness
+    and clarity over speed.
     """
+
+    # --- GF(256) arithmetic ---
+
+    # Precompute exp and log tables for GF(256) with generator 2
+    _GF_EXP = [0] * 512  # anti-log table (doubled for convenience)
+    _GF_LOG = [0] * 256  # log table
+    _GF_INITIALIZED = False
+
+    @classmethod
+    def _init_gf(cls):
+        """Initialize GF(256) lookup tables."""
+        if cls._GF_INITIALIZED:
+            return
+        x = 1
+        for i in range(255):
+            cls._GF_EXP[i] = x
+            cls._GF_LOG[x] = i
+            x <<= 1
+            if x & 0x100:
+                x ^= 0x11D  # x^8 + x^4 + x^3 + x^2 + 1
+        for i in range(255, 512):
+            cls._GF_EXP[i] = cls._GF_EXP[i - 255]
+        cls._GF_LOG[0] = 0  # convention: log(0) = 0 (never used in valid ops)
+        cls._GF_INITIALIZED = True
+
+    @classmethod
+    def _gf_mul(cls, a: int, b: int) -> int:
+        """Multiply two GF(256) elements."""
+        if a == 0 or b == 0:
+            return 0
+        return cls._GF_EXP[cls._GF_LOG[a] + cls._GF_LOG[b]]
+
+    @classmethod
+    def _gf_inv(cls, a: int) -> int:
+        """Multiplicative inverse in GF(256). a must be non-zero."""
+        assert a != 0, "Cannot invert zero in GF(256)"
+        return cls._GF_EXP[255 - cls._GF_LOG[a]]
 
     @staticmethod
     def _pad(data: bytes, k: int) -> bytes:
@@ -567,44 +610,141 @@ class ErasureCoder:
             data += b'\x00' * (k - remainder)
         return data
 
-    @staticmethod
-    def encode(data: bytes, n: int, k: int) -> list[bytes]:
-        """Encode data into n shards."""
+    @classmethod
+    def encode(cls, data: bytes, n: int, k: int) -> list[bytes]:
+        """
+        Encode data into n shards using a Vandermonde matrix over GF(256).
+
+        The encoding matrix M is n×k where M[i][j] = i^j in GF(256).
+        The first k rows form the identity (when i < k, using evaluation
+        points 0, 1, ..., k-1 with the convention that 0^0 = 1).
+
+        Actually, we use evaluation points alpha_i = i for systematic encoding:
+        - Rows 0..k-1 produce data shards (identity-like via Vandermonde)
+        - Rows k..n-1 produce parity shards
+        """
         assert n > k > 0, "Need n > k > 0"
+        assert n <= 256, "GF(256) supports at most 256 evaluation points"
+        cls._init_gf()
 
         length_prefix = struct.pack('>Q', len(data))
-        padded = ErasureCoder._pad(length_prefix + data, k)
+        padded = cls._pad(length_prefix + data, k)
         chunk_size = len(padded) // k
 
-        shards = [padded[i * chunk_size:(i + 1) * chunk_size] for i in range(k)]
+        # Split into k data chunks
+        data_chunks = [padded[i * chunk_size:(i + 1) * chunk_size] for i in range(k)]
 
-        for p in range(n - k):
-            parity = bytearray(chunk_size)
-            for i in range(k):
-                idx = (i + p) % k
-                for j in range(chunk_size):
-                    parity[j] ^= shards[idx][j]
-                    parity[j] ^= ((p + 1) * (j % 256)) & 0xFF
-            shards.append(bytes(parity))
+        # Generate n shards via Vandermonde matrix multiplication over GF(256)
+        # shard[i] = sum_j(alpha_i^j * data_chunk[j]) for each byte position
+        # We use alpha_i = i+1 (avoiding 0 to keep the matrix non-singular)
+        shards = []
+        for i in range(n):
+            alpha = i + 1  # evaluation point (1, 2, ..., n) — all non-zero
+            shard = bytearray(chunk_size)
+            for byte_pos in range(chunk_size):
+                val = 0
+                alpha_power = 1  # alpha^0 = 1
+                for j in range(k):
+                    val ^= cls._gf_mul(alpha_power, data_chunks[j][byte_pos])
+                    alpha_power = cls._gf_mul(alpha_power, alpha)
+                shard[byte_pos] = val
+            shards.append(bytes(shard))
 
         return shards
 
-    @staticmethod
-    def decode(shards: dict[int, bytes], n: int, k: int) -> bytes:
-        """Decode from k-of-n shards. Input: {shard_index: shard_data}."""
+    @classmethod
+    def _invert_vandermonde(cls, alphas: list[int], k: int) -> list[list[int]]:
+        """
+        Invert the k×k Vandermonde matrix V[i][j] = alphas[i]^j
+        via Gaussian elimination over GF(256).
+
+        Returns V^{-1} so that coefficients = V^{-1} * evaluations.
+        """
+        # Build augmented matrix [V | I]
+        aug = []
+        for i in range(k):
+            row = []
+            alpha_power = 1  # alphas[i]^0 = 1
+            for j in range(k):
+                row.append(alpha_power)
+                alpha_power = cls._gf_mul(alpha_power, alphas[i])
+            # Append identity column
+            row.extend(1 if j == i else 0 for j in range(k))
+            aug.append(row)
+
+        # Forward elimination + back substitution (full Gauss-Jordan)
+        for col in range(k):
+            # Find pivot row
+            pivot = None
+            for row in range(col, k):
+                if aug[row][col] != 0:
+                    pivot = row
+                    break
+            assert pivot is not None, "Vandermonde matrix is singular (duplicate alphas?)"
+
+            # Swap pivot into position
+            if pivot != col:
+                aug[col], aug[pivot] = aug[pivot], aug[col]
+
+            # Scale pivot row so leading entry = 1
+            inv_pivot = cls._gf_inv(aug[col][col])
+            for j in range(2 * k):
+                aug[col][j] = cls._gf_mul(aug[col][j], inv_pivot)
+
+            # Eliminate this column in all other rows
+            for row in range(k):
+                if row == col:
+                    continue
+                factor = aug[row][col]
+                if factor == 0:
+                    continue
+                for j in range(2 * k):
+                    aug[row][j] ^= cls._gf_mul(factor, aug[col][j])
+
+        # Extract inverse (right half)
+        return [aug[i][k:] for i in range(k)]
+
+    @classmethod
+    def decode(cls, shards: dict[int, bytes], n: int, k: int) -> bytes:
+        """
+        Decode from ANY k-of-n shards via Vandermonde matrix inversion over GF(256).
+
+        This is the core availability guarantee: ANY k shards are sufficient,
+        not just shards 0..k-1. A node failure that loses shard 0 is recoverable
+        as long as k total shards remain from any indices.
+
+        Math: During encoding, shard[i] = V[i] · c where V is Vandermonde with
+        alpha_i = i+1, and c is the vector of data chunk bytes (= polynomial
+        coefficients). Given k evaluations at known alphas, we recover c = V^{-1} · y.
+
+        Input: {shard_index: shard_data} — at least k entries, any indices.
+        """
         assert len(shards) >= k, f"Need at least {k} shards, got {len(shards)}"
+        cls._init_gf()
 
-        data_shards = {i: s for i, s in shards.items() if i < k}
+        # Take exactly k shards (any k will do)
+        indices = sorted(shards.keys())[:k]
+        chunk_size = len(shards[indices[0]])
 
-        if len(data_shards) >= k:
-            reconstructed = b''.join(data_shards[i] for i in range(k))
-            original_length = struct.unpack('>Q', reconstructed[:8])[0]
-            return reconstructed[8:8 + original_length]
-        else:
-            raise ValueError(
-                "PoC limitation: need data shards 0..k-1 for reconstruction. "
-                "Production: full RS decoding from any k shards."
-            )
+        # Evaluation points used during encoding: alpha_i = i + 1
+        alphas = [i + 1 for i in indices]
+
+        # Invert the Vandermonde sub-matrix once (same for all byte positions)
+        V_inv = cls._invert_vandermonde(alphas, k)
+
+        # For each byte position, recover polynomial coefficients = data chunks
+        reconstructed = bytearray(chunk_size * k)
+        for byte_pos in range(chunk_size):
+            y_vals = [shards[idx][byte_pos] for idx in indices]
+            for m in range(k):
+                val = 0
+                for j in range(k):
+                    val ^= cls._gf_mul(V_inv[m][j], y_vals[j])
+                reconstructed[m * chunk_size + byte_pos] = val
+
+        result = bytes(reconstructed)
+        original_length = struct.unpack('>Q', result[:8])[0]
+        return result[8:8 + original_length]
 
 
 # ===========================================================================
@@ -1525,6 +1665,110 @@ def demo():
             print(f"  [VERIFY] ✗ Transfer failed after eviction")
         print("└─ Verification complete\n")
 
+    # --- Degraded Materialization Demo ---
+    # This demonstrates the core availability guarantee: reconstruction
+    # from ANY k-of-n shards, not just the first k data shards.
+    print("─" * 74)
+    print("▸ AVAILABILITY GUARANTEE: Degraded Materialization")
+    print("─" * 74)
+    print()
+
+    # Commit a fresh entity for the degraded test
+    degraded_content = b"This entity survives catastrophic shard loss."
+    degraded_entity = Entity(content=degraded_content, shape="availability-test")
+    entity_id, record, cek = protocol.commit(degraded_entity, alice, n=8, k=4)
+    sealed_key = protocol.lattice(entity_id, record, cek, bob,
+                                   access_policy={"type": "availability-test"})
+
+    # Show normal materialization first
+    print()
+    print("┌─ BASELINE: Normal materialization (first 4 shards)")
+    baseline = protocol.materialize(sealed_key, bob)
+    if baseline is not None:
+        print(f"  [VERIFY] Baseline: {'✓ EXACT MATCH' if baseline == degraded_content else '✗ MISMATCH'}")
+    print("└─ Done\n")
+
+    # Now simulate catastrophic loss: destroy shards 0, 1, 2 across all nodes
+    # This forces reconstruction from non-sequential shards (3, 4, 5, 6 or similar)
+    print("┌─ SIMULATING CATASTROPHIC SHARD LOSS")
+    destroyed_indices = [0, 1, 2]
+    for idx in destroyed_indices:
+        target_nodes = network._placement(entity_id, idx)
+        for node in target_nodes:
+            if not node.evicted:
+                node.remove_shard(entity_id, idx)
+    print(f"  [CATASTROPHE] Destroyed shards {destroyed_indices} across ALL replicas")
+    print(f"  [CATASTROPHE] Only shards 3-7 remain (5 of 8)")
+    print(f"  [CATASTROPHE] Need k=4 for reconstruction — should still succeed")
+    print("└─ Shard destruction complete\n")
+
+    # Attempt materialization from remaining non-sequential shards
+    print("┌─ DEGRADED MATERIALIZATION: From non-sequential shards")
+
+    # Re-seal for a new materialization (each seal is one-use)
+    sealed_key2 = protocol.lattice(entity_id, record, cek, bob,
+                                    access_policy={"type": "availability-test"})
+    degraded_result = protocol.materialize(sealed_key2, bob)
+    if degraded_result is not None:
+        match = degraded_result == degraded_content
+        print(f"  [VERIFY] Degraded reconstruction: {'✓ EXACT MATCH' if match else '✗ MISMATCH'}")
+        print(f"  [VERIFY] ═══ ANY {record.encoding_params['k']}-of-{record.encoding_params['n']} shards reconstruct the entity ═══")
+        print(f"  [VERIFY] Lost shards {destroyed_indices} (including ALL original data shards 0-2)")
+        print(f"  [VERIFY] Reconstructed from parity + remaining data shards")
+    else:
+        print(f"  [VERIFY] ✗ Degraded materialization failed")
+    print("└─ Done\n")
+
+    # Now push past the failure boundary: destroy one more shard
+    print("┌─ AVAILABILITY BOUNDARY: Destroy one more shard (below k)")
+    # Destroy shard 3 — now only 4 remain (exactly k), so it should still work
+    for node in network._placement(entity_id, 3):
+        if not node.evicted:
+            node.remove_shard(entity_id, 3)
+    print(f"  [BOUNDARY] Destroyed shard 3 — exactly k=4 shards remain (4,5,6,7)")
+    sealed_key3 = protocol.lattice(entity_id, record, cek, bob,
+                                    access_policy={"type": "boundary-test"})
+    boundary_result = protocol.materialize(sealed_key3, bob)
+    if boundary_result is not None:
+        match = boundary_result == degraded_content
+        print(f"  [VERIFY] At k boundary: {'✓ EXACT MATCH' if match else '✗ MISMATCH'}")
+        print(f"  [VERIFY] Exactly k=4 shards available — minimum for reconstruction")
+    else:
+        print(f"  [VERIFY] ✗ Failed at k boundary (unexpected)")
+    print("└─ Done\n")
+
+    # Cross the boundary: destroy one more → should fail gracefully
+    print("┌─ BELOW THRESHOLD: Only k-1 shards remain")
+    for node in network._placement(entity_id, 4):
+        if not node.evicted:
+            node.remove_shard(entity_id, 4)
+    print(f"  [BOUNDARY] Destroyed shard 4 — only 3 shards remain (k=4 needed)")
+    sealed_key4 = protocol.lattice(entity_id, record, cek, bob,
+                                    access_policy={"type": "below-threshold"})
+    below_result = protocol.materialize(sealed_key4, bob)
+    if below_result is None:
+        print(f"  [VERIFY] ✓ CORRECTLY FAILED — insufficient shards (3 < k=4)")
+        print(f"  [VERIFY] Availability guarantee: entity is PERMANENTLY LOST")
+        print(f"  [VERIFY] Immutability guarantee: entity ID still in log, content unreconstructable")
+    else:
+        print(f"  [VERIFY] ✗ Unexpected success — should have failed")
+    print("└─ Done\n")
+
+    print("  AVAILABILITY vs. IMMUTABILITY SUMMARY:")
+    print("  ┌───────────────────────┬──────────────────────────────────────────┐")
+    print("  │ Guarantee             │ Status                                   │")
+    print("  ├───────────────────────┼──────────────────────────────────────────┤")
+    print("  │ Immutability          │ UNCONDITIONAL — content-addressed hash   │")
+    print("  │                       │ ensures any reconstruction is authentic  │")
+    print("  ├───────────────────────┼──────────────────────────────────────────┤")
+    print("  │ Availability (≥k)     │ CONDITIONAL — requires ≥k shard indices  │")
+    print("  │                       │ with ≥1 live replica each               │")
+    print("  ├───────────────────────┼──────────────────────────────────────────┤")
+    print("  │ Failure mode          │ GRACEFUL — returns None, not corrupted   │")
+    print("  │                       │ data. Immutability never violated.       │")
+    print("  └───────────────────────┴──────────────────────────────────────────┘")
+    print()
+
     # --- Summary ---
     print("=" * 74)
     print("  TRANSFER SUMMARY — Post-Quantum Security (ML-KEM-768 + ML-DSA-65)")
@@ -1559,7 +1803,7 @@ def demo():
     print("  ✓ Sybil resistance: identity attestation + storage proofs")
     print("  ✓ Collusion resistance: AEAD-encrypted shards (CEK never on nodes)")
     print("  ✓ Repair protocol: re-replicate ciphertext on eviction (no plaintext)")
-    print("  ✓ Availability: erasure coding (k-of-n) × replication (r copies)")
+    print("  ✓ Availability: erasure coding (any k-of-n over GF(256)) × replication")
     print()
     print("  FORWARD SECRECY LIFECYCLE:")
     print("  1. Each seal() calls ML-KEM.Encaps(receiver_ek) → fresh (ss, ct)")

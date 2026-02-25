@@ -227,7 +227,7 @@ quantum states). LTP has nothing to do with quantum latticement. Using this term
 **Fix required:** Either rename the protocol or add an explicit disclaimer that the term
 is metaphorical.
 
-### 3.3 Commitment Network Bootstrap Problem
+### 3.3 Commitment Network Bootstrap Problem ✅ *Addressed — see WHITEPAPER §5*
 
 The paper assumes a commitment network exists but doesn't address:
 - How does the first node join?
@@ -238,7 +238,7 @@ The paper assumes a commitment network exists but doesn't address:
 These are the exact problems that took Filecoin/Storj years to address with proof-of-
 spacetime, proof-of-replication, etc.
 
-### 3.4 Availability vs. Immutability Tension
+### 3.4 Availability vs. Immutability Tension ✅ *Addressed — see WHITEPAPER §4.3, §5.4*
 
 The paper guarantees immutability (data can't be changed) but doesn't adequately address
 availability (data can be accessed). If nodes go offline and fewer than k shards remain
@@ -246,6 +246,12 @@ available, the entity is permanently lost — immutable but inaccessible.
 
 This is the CAP theorem in disguise: you cannot have perfect consistency, availability,
 and partition tolerance simultaneously.
+
+**Resolution:** §4.3 formally separates the two guarantees (Theorem 1: Immutability is
+unconditional; Theorem 2: Availability boundary is sharp at k shards). §5.4 provides the
+probabilistic availability model with explicit CAP theorem analysis. The PoC erasure coder
+now implements true any-k-of-n reconstruction over GF(256), demonstrated with catastrophic
+shard loss, boundary-exact reconstruction (exactly k shards), and graceful failure below k.
 
 ---
 
@@ -351,9 +357,12 @@ materialize), not the individual components.
    quantitatively (not just qualitatively) to direct transfer, IPFS, etc.
 
 9. **Decide on quantum posture** — either go fully post-quantum or acknowledge the gap.
+   ✅ *Addressed — ML-KEM-768 + ML-DSA-65 throughout.*
 
 10. **Fix the PoC erasure coding** — the current implementation only reconstructs from data
     shards 0..k-1 (not arbitrary k-of-n). This undermines the availability claim.
+    ✅ *Addressed — Vandermonde matrix encoding over GF(256) with Gauss-Jordan decoding.
+    Demo verifies: shards {4,5,6,7} reconstruct data originally split into shards {0,1,2,3}.*
 
 ### Nice to Have (Polish)
 

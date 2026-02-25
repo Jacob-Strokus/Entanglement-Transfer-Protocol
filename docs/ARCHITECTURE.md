@@ -419,7 +419,7 @@ parallel local O(entity/k) fetches, plus amortized fan-out to multiple receivers
 | Hash function | BLAKE3 | Fast, secure, parallelizable, ZK-friendly |
 | Signatures | ML-DSA-65 (FIPS 204) | Post-quantum (Dilithium); NIST Level 3 |
 | Key encapsulation | ML-KEM-768 (FIPS 203) | Post-quantum (Kyber); replaces X25519 |
-| Erasure coding | Reed-Solomon GF(2^8) | Well-understood, deterministic, efficient |
+| Erasure coding | Vandermonde RS over GF(256) | Any k-of-n reconstruction (polynomial 0x11D) |
 | Commitment log | Merkle DAG / append-only ledger | Immutable, verifiable, decentralizable |
 | Shard placement | Consistent hashing (jump hash) | Deterministic, balanced, minimal disruption |
 | Shard encryption | XChaCha20-Poly1305 | AEAD, fast, nonce-misuse resistant |

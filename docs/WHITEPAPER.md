@@ -341,6 +341,54 @@ previous one:
 This creates an immutable **version chain**. Every version exists permanently. "Updating" is
 actually "appending a new version." The full history is always auditable.
 
+### 4.3 Immutability ≠ Availability
+
+A critical distinction that protocols often conflate:
+
+| Property | Guarantee | Condition |
+|----------|----------|-----------|
+| **Immutability** | If data is reconstructed, it is *exactly* what was committed | UNCONDITIONAL — content-addressing ensures any valid reconstruction is authentic. No mechanism exists to produce corrupted data with a valid EntityID. |
+| **Availability** | Committed data *can* be reconstructed | CONDITIONAL — requires ≥ $k$ shard indices with ≥ 1 live replica each (see §5.4) |
+
+**Theorem 1 (Immutability).** Let $E$ be an entity committed with EntityID $= H(E)$. Any
+content $E'$ produced by the MATERIALIZE phase satisfies $E' = E$, or the integrity check
+fails and the receiver obtains nothing. There is no intermediate state where the receiver
+accepts incorrect data.
+
+*Proof sketch.* MATERIALIZE verifies $H(E') = \text{EntityID}$ (step 8). AEAD tags protect
+each shard against tampering. The Merkle root in the commitment record commits to the
+exact set of shard hashes. Modifying any shard changes its hash, which changes the Merkle
+root, which doesn't match the signed commitment. The ML-DSA signature prevents forging a
+new commitment record. ∎
+
+**Theorem 2 (Availability Boundary).** Let $A_i$ denote the event that shard index $i$ has
+at least one available replica. The entity is reconstructable if and only if
+$|\{i : A_i\}| \geq k$. Below this threshold, the entity is **permanently lost** — the
+commitment record proves it existed, but the content cannot be recovered.
+
+The failure mode is **graceful, not corrupted**: MATERIALIZE returns nothing rather than
+partial or incorrect data. Immutability is never violated — the entity either materializes
+exactly or doesn't materialize at all.
+
+**Why this tension is fundamental.** Any distributed storage system must accept that
+availability is probabilistic: disks fail, operators leave, regions go offline. LTP's
+contribution is making the two guarantees *orthogonal*:
+
+- Immutability is enforced by *cryptography* (hashes, signatures, AEAD tags) — it holds
+  regardless of network state.
+- Availability is enforced by *redundancy* ($k$-of-$n$ erasure coding × $r$-way
+  replication) — it degrades with failures but can be restored via repair.
+
+The `ErasureCoder` implements true any-$k$-of-$n$ reconstruction over GF(256), using a
+Vandermonde encoding matrix with Gauss-Jordan decoding. This means:
+
+- The first $k$ data shards are NOT privileged — any $k$ shards suffice
+- Losing ALL data shards (indices 0 through $k-1$) is survivable if $k$ parity shards remain
+- The failure boundary is sharp: at $k$ shards the entity reconstructs exactly; at $k-1$
+  it is irrecoverable
+
+See §5.4 for the full availability model, failure modes, and repair protocol.
+
 ---
 
 ## 5. Commitment Network
@@ -572,6 +620,13 @@ $$P(\text{entity available}) = \sum_{j=4}^{8} \binom{8}{j} (0.999)^j (0.001)^{8-
 Even with 10% individual node failure rate, the combination of erasure coding ($k$-of-$n$)
 and replication ($r$ copies) produces >99.9999999% availability. This is the power of
 compounding two orthogonal redundancy mechanisms.
+
+**Erasure coding guarantee.** The availability model assumes ANY $k$ shards are sufficient
+for reconstruction — not just the first $k$ "data" shards. The reference implementation
+achieves this via a Vandermonde encoding matrix over GF(256) with Gauss-Jordan decoding.
+Shard indices are not privileged: losing all "data" shards is recoverable if $k$ "parity"
+shards survive. The proof-of-concept demonstrates this explicitly (see demo: "Degraded
+Materialization").
 
 #### 5.4.2 Failure Modes and Repair
 
