@@ -343,9 +343,322 @@ actually "appending a new version." The full history is always auditable.
 
 ---
 
-## 5. Breaking the Constraints
+## 5. Commitment Network
 
-### 5.1 Latency
+The protocol assumes a distributed network of commitment nodes that store encrypted shards
+and serve them to authorized receivers. This section addresses how that network comes into
+existence, how it resists attacks, and what availability guarantees it can offer.
+
+### 5.1 Bootstrap: How the Network Starts
+
+LTP defines a **permissioned genesis** with a path to progressive decentralization.
+
+#### 5.1.1 Genesis Configuration
+
+A deployment begins with a genesis configuration:
+
+```json
+{
+  "genesis_version": 1,
+  "minimum_nodes": 6,
+  "minimum_regions": 3,
+  "minimum_admin_domains": 2,
+  "genesis_operators": [
+    {"id": "operator_a", "attestation": "ml-dsa-65:vk_a...", "region": "US-East"},
+    {"id": "operator_b", "attestation": "ml-dsa-65:vk_b...", "region": "EU-West"},
+    {"id": "operator_c", "attestation": "ml-dsa-65:vk_c...", "region": "AP-East"}
+  ],
+  "admission_policy": "permissioned",
+  "audit_interval_seconds": 3600
+}
+```
+
+The genesis set must satisfy:
+- At least $2k$ nodes (where $k$ = minimum reconstruction threshold), ensuring no single
+  entity of $k$ nodes can reconstruct all shards even before considering encryption
+- Nodes span $\geq 3$ geographic regions and $\geq 2$ administrative domains
+- Each genesis operator provides an ML-DSA-65 verification key as identity attestation
+
+#### 5.1.2 Why Permissioned Genesis?
+
+A fully permissionless bootstrap (like Bitcoin's) requires a consensus mechanism from block 0
+and is vulnerable to early Sybil attacks when the network is small. LTP's commitment network
+is a **storage network**, not a ledger — it does not need proof-of-work or proof-of-stake for
+its primary function (storing and serving encrypted shards). The trust requirement is lighter:
+nodes must be **available** and **honest about storage** (they need not agree on global
+transaction ordering).
+
+Starting permissioned and progressively opening admission is the approach taken by
+Certificate Transparency [7] and Hyperledger Fabric [8], both of which share LTP's
+requirement for append-only integrity without full decentralized consensus.
+
+#### 5.1.3 Progressive Decentralization
+
+The network evolves through three stages:
+
+| Stage | Admission | Sybil Resistance | Trust Model |
+|-------|-----------|-------------------|-------------|
+| **Genesis** | Curated operators only | Identity verification | Known operators |
+| **Permissioned** | Application + endorsement by $m$-of-$n$ existing operators | Identity + storage proofs | Reputation + audit |
+| **Open** | Self-registration + storage bond + storage proofs | Economic + cryptographic | Proof-based (minimal trust) |
+
+Transition between stages is governed by the genesis configuration and requires a
+supermajority ($\geq 2/3$) of existing operators to approve via signed votes.
+
+### 5.2 Sybil Resistance
+
+A Sybil attack occurs when an adversary creates many fake identities to gain disproportionate
+influence. In LTP's context, a Sybil attacker controlling many nodes could:
+- Dominate shard placement (receive most shards via consistent hashing)
+- Coordinate to withhold shards (availability attack)
+- In pre-Option-C designs, coordinate to reconstruct data (confidentiality attack — **now mitigated**)
+
+LTP employs a dual-layer Sybil defense:
+
+#### 5.2.1 Layer 1: Identity Verification
+
+Every commitment node must prove its identity through one of:
+
+| Method | Stage | Mechanism |
+|--------|-------|-----------|
+| Operator attestation | Genesis / Permissioned | Organizational identity verified by existing operators |
+| SPIFFE/SPIRE SVID [11] | Permissioned / Open | Short-lived X.509 workload identity, automatically rotated |
+| Economic bond | Open | Deposit stake to a smart contract; stake slashed on misbehavior |
+
+Each identity method binds a node to a **verifiable identity** that is expensive to replicate
+at scale. An attacker cannot cheaply create thousands of identities.
+
+#### 5.2.2 Layer 2: Storage Proofs
+
+Identity alone is insufficient — a node could register legitimately but not actually store
+data. LTP requires ongoing **proof-of-storage** via a lightweight challenge-response protocol:
+
+```
+Auditor → Node:  Challenge(entity_id, shard_index, nonce)
+Node → Auditor:  H(encrypted_shard || nonce)    [within time bound T]
+```
+
+- The auditor sends a random nonce and a specific (entity_id, shard_index) pair
+- The node must return `H(ciphertext || nonce)` within a time bound $T$
+- Since shards are AEAD-encrypted, the node computes over **ciphertext** — no plaintext
+  access is needed and no confidentiality is compromised
+- The auditor can verify the response because it knows the expected `H(ciphertext || nonce)`
+  (it can compute this from the data it observed during the commit phase, or by fetching
+  the shard from a different replica)
+
+**Why this is simpler than Filecoin's Proof-of-Replication:**
+
+Filecoin requires Proofs of Replication (PoRep) and Proofs of Spacetime (PoSt) to prevent
+nodes from generating data on-the-fly or outsourcing storage. These require SNARKs, VDFs
+(verifiable delay functions), and a sealing ceremony. LTP's storage proofs are lighter because:
+
+1. **No deduplication defense needed.** Filecoin must prove *unique* physical copies exist
+   (to prevent a node from storing one copy and claiming storage for many). LTP doesn't care
+   about physical uniqueness — if a node can serve the correct ciphertext, that's sufficient.
+
+2. **No proof-of-spacetime needed.** Filecoin must prove *continuous* storage over time via
+   periodic SNARK proofs. LTP uses periodic random challenges — simpler but weaker. A node
+   that re-fetches data just before an audit passes the challenge but doesn't actually store
+   persistently. This is an accepted tradeoff: the time-bounded challenge ($T$) limits how
+   far away re-fetch storage can be, and economic bonds make the penalty for audit failure
+   outweigh the savings from shirking.
+
+3. **Ciphertext is randomly verifiable.** Since encrypted shards are deterministic (same CEK +
+   shard + nonce → same ciphertext), any party with a copy can verify any other party's claim.
+
+#### 5.2.3 Audit Protocol
+
+Audits are performed by a rotating set of auditors selected from the existing operator pool:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    AUDIT PROTOCOL                            │
+│                                                              │
+│  1. Auditor selection: round-robin from operators            │
+│  2. Target selection: random (entity_id, shard_index) pair   │
+│     from the commitment log                                  │
+│  3. Challenge: Auditor sends (entity_id, index, nonce)       │
+│  4. Response: Node returns H(ciphertext || nonce) within T   │
+│  5. Verification: Auditor compares against known-good hash   │
+│  6. Result:                                                  │
+│     ✓ Pass → node reputation +1                              │
+│     ✗ Fail → strike recorded                                 │
+│     ✗✗ 3 strikes → eviction + bond slash (if applicable)     │
+│  7. Repair: evicted node's shards re-replicated to healthy   │
+│     nodes (ciphertext only — no plaintext exposed)           │
+└─────────────────────────────────────────────────────────────┘
+```
+
+The audit interval is configurable (default: every 3600 seconds per node). A node that fails
+3 consecutive audits is evicted. Its shards are re-replicated from surviving replicas to
+maintain the replication factor $r$.
+
+### 5.3 Collusion Resistance
+
+The collusion question is: **what if $k$ or more nodes conspire to pool their shards and
+reconstruct an entity?**
+
+#### 5.3.1 Pre-Option-C (Broken)
+
+In the original design (plaintext shards), $k$ colluding nodes holding distinct shard indices
+could reconstruct the full entity via erasure decoding. This was a real vulnerability.
+
+#### 5.3.2 Post-Option-C (Mitigated)
+
+With Option C (implemented in LTP v2), all shards are AEAD-encrypted with a random CEK before
+distribution. Colluding nodes face the following:
+
+```
+k colluding nodes pool encrypted shards
+  → Erasure decode ciphertext → encrypted entity (useless without CEK)
+  → CEK exists ONLY inside the sealed lattice key
+  → Sealed lattice key is ML-KEM-encapsulated to the receiver's ek
+  → Collusion without CEK is computationally equivalent to breaking AEAD
+```
+
+**Formal argument:** Let $\mathcal{A}$ be an adversary controlling $k$ or more nodes. $\mathcal{A}$
+possesses $k$ encrypted shards $\{E_i = \text{AEAD}(CEK, S_i, i)\}_{i \in K}$ where $|K| \geq k$.
+To recover any plaintext shard $S_i$, $\mathcal{A}$ must break the IND-CPA security of the AEAD
+scheme without knowledge of CEK. The CEK is:
+
+- Never transmitted to any commitment node
+- Only present inside the sealed lattice key (ML-KEM-768 encapsulated to receiver)
+- Generated fresh per entity (no key reuse across entities)
+
+Therefore, node collusion reduces to AEAD key recovery, which is computationally infeasible
+under standard assumptions.
+
+**What collusion CAN still achieve:**
+
+| Attack | Can colluding nodes do it? | Mitigation |
+|--------|---------------------------|------------|
+| Read plaintext content | **No** — shards are AEAD-encrypted | Option C |
+| Reconstruct encrypted entity | **Yes** — but useless without CEK | Option C |
+| Withhold shards (availability attack) | **Yes** — denial of service | Replication + audit |
+| Delete shards | **Yes** — but detected by audit | Audit + repair protocol |
+| Serve corrupted shards | **No** — AEAD tag verification catches corruption | AEAD integrity |
+
+The residual risk from collusion is **availability**, not **confidentiality**. This is addressed
+in Section 5.4.
+
+### 5.4 Data Availability
+
+Immutability guarantees that committed data **cannot be changed**. Availability guarantees
+that committed data **can be accessed**. LTP provides probabilistic availability guarantees,
+not absolute ones.
+
+#### 5.4.1 Availability Model
+
+Given:
+- $n$ = total shards per entity
+- $k$ = reconstruction threshold ($k < n$)
+- $r$ = replication factor (copies of each shard across independent nodes)
+- $p$ = probability a single node is unavailable (crash, eviction, network partition)
+
+A shard index $i$ is available if **at least 1** of its $r$ replicas is online:
+
+$$P(\text{shard}_i \text{ available}) = 1 - p^r$$
+
+The entity is available if **at least $k$** of $n$ shard indices have at least one live replica:
+
+$$P(\text{entity available}) = \sum_{j=k}^{n} \binom{n}{j} (1 - p^r)^j \cdot (p^r)^{n-j}$$
+
+**Worked example** ($n = 8, k = 4, r = 3, p = 0.1$):
+
+$$P(\text{shard}_i \text{ available}) = 1 - 0.1^3 = 0.999$$
+
+$$P(\text{entity available}) = \sum_{j=4}^{8} \binom{8}{j} (0.999)^j (0.001)^{8-j} \approx 0.999\,999\,999\,97$$
+
+Even with 10% individual node failure rate, the combination of erasure coding ($k$-of-$n$)
+and replication ($r$ copies) produces >99.9999999% availability. This is the power of
+compounding two orthogonal redundancy mechanisms.
+
+#### 5.4.2 Failure Modes and Repair
+
+| Failure | Detection | Response |
+|---------|-----------|----------|
+| Single node crash | Audit challenge timeout | Re-replicate affected shards from surviving replicas |
+| Region outage | Multiple audit failures in same region | Trigger cross-region re-replication |
+| Node eviction (misbehavior) | 3 consecutive audit failures | Slash bond, redistribute shards |
+| Correlated failure ($> n - k$ shard indices lost) | MATERIALIZE returns < k shards | Entity becomes **permanently unavailable** (committed but inaccessible) |
+
+**Repair protocol:** When a node is evicted or detected as failed, the network executes:
+
+```
+1. Identify all (entity_id, shard_index) pairs stored on the failed node
+2. For each pair, check if other replicas exist on healthy nodes
+3. If replica exists: copy encrypted shard to a new node (assignment via consistent hash)
+4. If no replica exists: shard index is marked DEGRADED (reduced redundancy)
+5. Update replication metadata
+```
+
+Critically, repair operates on **ciphertext**. The repair process never requires the CEK or
+any access to plaintext. Any authorized node can store a replica without learning content.
+
+#### 5.4.3 The CAP Theorem and LTP
+
+LTP's commitment network must navigate the CAP theorem:
+
+| CAP Property | LTP's Choice |
+|-------------|-------------|
+| **Consistency** | Commitment log is strongly consistent (append-only, hash-chained). Shard storage is eventually consistent (replicas may lag). |
+| **Availability** | Probabilistic (see §5.4.1). Not guaranteed under correlated failure of $> n - k$ shard indices. |
+| **Partition Tolerance** | Supported. Partitioned regions serve locally-cached shards; commitment log reconciles post-partition. |
+
+**Honest assessment:** LTP prioritizes **consistency** (immutability is non-negotiable) and
+**partition tolerance** (geographically distributed by design). Availability is probabilistic
+and degrades under correlated failures. This is the same tradeoff made by Tahoe-LAFS [3]
+and Storj [4].
+
+#### 5.4.4 Availability vs. Permanence
+
+The commitment record is **permanent** (on the append-only log). The shards are **available
+with high probability** but not guaranteed permanent:
+
+- Shards may have a **TTL (time-to-live)** after which nodes MAY evict them
+- Without economic incentives, rational nodes have no reason to store data indefinitely
+- For permanent storage, senders must **renew TTL** (potentially with payment)
+- The commitment record survives even if all shards are evicted — the entity is proven to
+  have existed, but can no longer be materialized
+
+This mirrors Filecoin's deal model: storage is a service, not a right. The protocol
+guarantees immutability and integrity; availability requires ongoing economic commitment.
+
+### 5.5 Network Economics (Interface, Not Implementation)
+
+LTP intentionally does **not** specify a token, a consensus mechanism, or a fee schedule.
+Instead, it defines **interfaces** that any economic layer must satisfy:
+
+```
+Interface: NodeIncentive
+  - compensate(node_id, bytes_stored, seconds_stored, bytes_served) → reward
+  - slash(node_id, audit_failure_count) → penalty
+
+Interface: CommitmentPricing
+  - price(entity_size, replication_factor, ttl_seconds) → cost
+  - renew(entity_id, additional_ttl) → cost
+
+Interface: AdmissionControl
+  - apply(node_identity, storage_proof, bond) → accepted | rejected
+  - evict(node_id, reason, audit_evidence) → confirmation
+```
+
+**Why not specify economics?** The optimal incentive mechanism depends on deployment context:
+
+| Deployment | Economic Model | Example |
+|-----------|---------------|---------|
+| Enterprise (private) | Organizational obligation | Internal SLA — nodes run by IT departments |
+| Consortium | Mutual obligation + SLA | CT log operators [7] — run by CAs for collective benefit |
+| Public (open) | Token/payment + staking | Filecoin [5], Storj [4] — economic incentives |
+
+Specifying a token would limit LTP to public deployments. Specifying organizational obligation
+would limit it to enterprises. The interface layer allows any of these.
+
+---
+
+## 6. Breaking the Constraints
+
+### 6.1 Latency
 
 **Traditional**: Latency = f(distance, hops, payload_size)  
 **LTP**: Latency = f(key_transmission) + f(nearest_shard_fetch)
@@ -365,7 +678,7 @@ The receiver still downloads O(entity) bytes of encrypted shards. The advantage 
 this download is from *nearby nodes* in parallel, not from a distant sender over a single
 path.
 
-### 5.2 Geographic Distance
+### 6.2 Geographic Distance
 
 **Traditional**: New York → Tokyo = ~200ms RTT minimum (speed of light through fiber).  
 For a 1 GB file at 100 Mbps effective throughput: ~80 seconds, bottlenecked by the single path.
@@ -386,7 +699,7 @@ bandwidth is higher than direct transfer. The advantage appears in:
 - **Latency:** receiver-local fetches vs. sender-distance fetches
 - **Sender-independence:** sender can go offline after commit
 
-### 5.3 Computing Power
+### 6.3 Computing Power
 
 **Traditional**: Sender must serialize, compress, encrypt, and transmit. Receiver must receive,
 decrypt, decompress, and deserialize. Both need sufficient compute.  
@@ -394,7 +707,7 @@ decrypt, decompress, and deserialize. Both need sufficient compute.
 can be offloaded to the commitment network. Materialization (erasure decoding from k shards) is
 computationally lightweight and highly parallelizable.
 
-### 5.4 Formal Cost Model
+### 6.4 Formal Cost Model
 
 Let:
 - $D$ = entity size in bytes
@@ -453,7 +766,7 @@ but with the sender free to go offline.
 
 ---
 
-## 6. Comparison with Existing Approaches
+## 7. Comparison with Existing Approaches
 
 | Property | TCP/IP | IPFS | BitTorrent | Tahoe-LAFS | Storj | **LTP** |
 |----------|--------|------|-----------|------------|-------|---------|
@@ -477,18 +790,18 @@ but with the sender free to go offline.
 **Reading guide:** LTP's unique cells (only LTP has "Yes") are: O(1) sender→receiver path,
 receiver-bound capabilities, per-message PQ forward secrecy, PQ-signed append-only audit log,
 and ZK privacy mode. The encrypted storage, erasure coding, and capability-based access that
-LTP shares with Tahoe-LAFS and Storj are acknowledged as prior art — see Section 7.
+LTP shares with Tahoe-LAFS and Storj are acknowledged as prior art — see Section 8.
 
 ---
 
-## 7. Related Work and Prior Art
+## 8. Related Work and Prior Art
 
 LTP is not built in a vacuum. Its design draws from, recombines, and extends ideas pioneered by
 decades of work in distributed systems, cryptography, and peer-to-peer networking. This section
 honestly acknowledges the lineage and articulates what — if anything — LTP contributes beyond
 its predecessors.
 
-### 7.1 Content-Addressed Storage
+### 8.1 Content-Addressed Storage
 
 **IPFS (InterPlanetary File System, 2015)** [1] introduced content-addressed, Merkle-DAG-based
 storage to mainstream distributed systems. In IPFS, files are split into blocks, each identified
@@ -508,7 +821,7 @@ Content Encryption Key (CEK), which is sealed inside the lattice key. IPFS retri
 *permissionless*; LTP materialization is *capability-gated*. Additionally, LTP encrypts all shards
 at rest (AEAD with CEK), whereas IPFS blocks are stored and served in plaintext by default.
 
-### 7.2 Erasure-Coded Distributed Storage
+### 8.2 Erasure-Coded Distributed Storage
 
 **Tahoe-LAFS (Least-Authority File Store, 2007)** [3] was among the first systems to combine
 erasure coding with capability-based access control for untrusted storage. Files are encrypted
@@ -522,7 +835,7 @@ and distributed to independent operators. Access grants (serialized macaroons) a
 
 **Filecoin (2020)** [5] extends IPFS with cryptoeconomic guarantees: storage providers submit
 Proofs of Replication and Proofs of Spacetime to demonstrate that data is physically stored.
-This addresses the data availability problem that LTP's Section 8 (Open Questions) leaves open.
+This addresses the data availability problem that LTP's Section 10 (Open Questions) leaves open.
 
 **What LTP borrows:** Erasure coding for redundancy and threshold reconstruction (k-of-n); client-side
 encryption before distribution; the property that storage nodes cannot read content.
@@ -539,7 +852,7 @@ We argue the value lies in the protocol-level UX: the sender thinks in terms of 
 lattice," not "upload to storage provider and share access grant." The operational semantics
 differ even if the underlying mechanisms are similar.
 
-### 7.3 Append-Only Commitment Logs
+### 8.3 Append-Only Commitment Logs
 
 **Bitcoin (2008)** [6] introduced the hash-chained, proof-of-work append-only ledger. Each block
 references the hash of the previous block, making history tamper-evident.
@@ -554,7 +867,7 @@ permissionless blockchains — permissioned channels with endorsement policies c
 immutability with lower latency and without proof-of-work.
 
 **What LTP borrows:** The commitment log is a direct application of these ideas. The whitepaper
-deliberately does not specify a consensus mechanism (Section 8, Open Question 3) — it could be
+deliberately does not specify a consensus mechanism (Section 10, Open Question 3) — it could be
 a blockchain, a CT-style Merkle log, or a permissioned ledger. The immutability guarantee
 (Section 4) relies only on the append-only property and hash chaining, not on a specific
 consensus protocol.
@@ -565,7 +878,7 @@ IDs, no content, no CEK. This is a tighter interface than most blockchain-based 
 tend to store more metadata. The log's purpose is *attestation* ("this entity was committed by
 this sender at this time"), not general-purpose state management.
 
-### 7.4 Capability-Based Security
+### 8.4 Capability-Based Security
 
 **Dennis & Van Horn (1966)** [9] introduced the capability model: an unforgeable token that
 simultaneously designates a resource and authorizes access to it. The holder of a capability
@@ -588,7 +901,7 @@ encryption (ML-KEM). A Storj access grant can be used by anyone who possesses it
 lattice key is sealed to a specific receiver's encapsulation key and is useless to anyone
 else. This binds the capability to a cryptographic identity, not just to possession.
 
-### 7.5 Peer-to-Peer Content Distribution
+### 8.5 Peer-to-Peer Content Distribution
 
 **BitTorrent (2001)** [12] demonstrated that large-file distribution could be decentralized:
 the original seeder uploads once, and peers exchange pieces among themselves. The more popular
@@ -612,7 +925,7 @@ application-layer protocol. LTP's commitment phase is a one-time sender operatio
 continuous seeding obligation), and the commitment network serves encrypted shards without
 needing to understand or index the content.
 
-### 7.6 Hybrid and Convergent Systems
+### 8.6 Hybrid and Convergent Systems
 
 Several systems have independently converged on similar combinations:
 
@@ -629,7 +942,7 @@ client-side encryption and server-side ignorance — similar to LTP's "nodes sto
 addressed messages and capability-based private groups. SSB's offline-first design (gossip
 replication, no central server) parallels LTP's sender-independence property.
 
-### 7.7 What LTP Contributes
+### 8.7 What LTP Contributes
 
 Given the depth of prior art, the honest answer is: **LTP's individual components are not novel.
 Its contribution is the protocol-level synthesis.**
@@ -699,9 +1012,9 @@ that reasonable reviewers may disagree.
 
 ---
 
-## 8. Use Cases
+## 9. Use Cases
 
-### 8.1 Large File Fan-Out
+### 9.1 Large File Fan-Out
 A 50 GB dataset is committed once. Any number of receivers can materialize it by each receiving
 a ~1,300-byte sealed lattice key (ML-KEM-768). Each receiver's materialization time is
 dominated by local shard fetching from nearby nodes — not by the sender's bandwidth or
@@ -709,21 +1022,21 @@ availability. For N receivers, direct transfer costs O(50GB × N). LTP costs O(5
 replication) for the commit plus O(~1,300B × N) for the keys — amortized cost per receiver
 approaches zero as N grows.
 
-### 8.2 Immutable Audit Trail
+### 9.2 Immutable Audit Trail
 Every data transfer is permanently recorded. A compliance system can verify: "Entity X was
 committed by Sender A at time T and lattice-linked with Receiver B." No party can deny or alter this.
 
-### 8.3 Secure Messaging
+### 9.3 Secure Messaging
 A message is committed and lattice-linked. The lattice key is the message notification. The
 content never traverses the public internet as a readable payload. Even if intercepted, the
 lattice key alone is useless.
 
-### 8.4 State Synchronization
+### 9.4 State Synchronization
 Two distributed systems synchronize state by exchanging lattice keys. Each system materializes
 the other's state from the commitment network. This is faster than traditional replication because
 shards are fetched locally, and only the delta (new entity) needs materialization.
 
-### 8.5 Cross-Planetary Data Transfer
+### 9.5 Cross-Planetary Data Transfer
 On a Mars colony with 4-24 minute light delay to Earth: commitment nodes on Mars cache shards.
 A sender on Earth commits an entity. The ~1,300-byte sealed lattice key crosses the void
 once (4-24 minutes). The receiver on Mars materializes from Mars-local commitment nodes (which
@@ -734,21 +1047,38 @@ and can happen asynchronously before any specific transfer.
 
 ---
 
-## 9. Open Questions
+## 10. Open Questions
 
-1. **Commitment network economics**: How are commitment nodes incentivized to store and serve shards?
+1. ~~**Commitment network economics**: How are commitment nodes incentivized to store and serve shards?~~
+   **Addressed in §5.5.** LTP defines economic interfaces (compensate, slash, pricing) without
+   mandating a specific mechanism. Deployment-dependent: organizational SLA, mutual obligation,
+   or token/staking (see §5.5 table).
+
 2. **Shard eviction**: When can shards be garbage collected? (Never? After TTL? After all authorized
-   receivers materialize?)
-3. **Commitment log consensus**: What consensus mechanism secures the append-only log? (Does it need
-   full BFT, or is a lighter mechanism sufficient?)
-4. **Bandwidth for initial shard distribution**: The commit phase still requires distributing n 
+   receivers materialize?) **Partially addressed in §5.4.4** — TTL-based eviction with renewal.
+   Open: optimal TTL default, interaction between TTL expiry and in-flight lattice keys.
+
+3. ~~**Commitment log consensus**: What consensus mechanism secures the append-only log?~~
+   **Addressed in §5.1.2.** LTP does not require full BFT consensus. The commitment network is
+   a storage network; the log requires only append-only integrity and hash chaining. A Certificate
+   Transparency–style Merkle log with trusted operators is sufficient.
+
+4. **Bandwidth for initial shard distribution**: The commit phase still requires distributing n
    shards. Can this be amortized or pipelined?
+
 5. **Real-time streaming**: Can LTP support continuous entity streams (video, telemetry), or is it
    inherently batch-oriented?
 
+6. **Audit protocol formalization**: The storage proof challenge-response (§5.2.2) is lightweight
+   but weaker than Filecoin's PoSt. A node that re-fetches data just before an audit passes
+   dishonestly. Can time-bounded challenges be tightened without requiring SNARKs?
+
+7. **Cross-deployment federation**: How do independently bootstrapped LTP networks discover and
+   trust each other's commitment nodes?
+
 ---
 
-## 10. Conclusion
+## 11. Conclusion
 
 LTP inverts the data transfer paradigm. Rather than asking "how do I send this data to you," it
 asks "how do I prove this data exists, and give you the right to reconstruct it near you."

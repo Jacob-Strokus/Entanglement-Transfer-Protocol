@@ -217,6 +217,70 @@ The Entity Engine is the sender-side component that prepares entities for commit
        shard content (ciphertext only).
 ```
 
+### 4.1 Node Lifecycle
+
+```
+┌──────────────────────────────────────────────────────────┐
+│                    NODE LIFECYCLE                          │
+│                                                           │
+│   ┌───────────┐    Identity      ┌───────────┐           │
+│   │   Apply   │───attestation───▶│   Admit   │           │
+│   │ (new node)│   + storage bond │ (verified) │           │
+│   └───────────┘                  └─────┬─────┘           │
+│                                        │                  │
+│                                        ▼                  │
+│                                 ┌────────────┐           │
+│                            ┌───▶│   Active   │◀──┐       │
+│                            │    │ (serving)  │   │       │
+│                            │    └──────┬─────┘   │       │
+│                            │           │         │       │
+│                            │      Audit│challenge│Pass   │
+│                            │           ▼         │       │
+│                            │    ┌────────────┐   │       │
+│                            │    │   Audit    │───┘       │
+│                            │    │ (respond   │           │
+│                            │    │  H(ct||n)) │           │
+│                            │    └──────┬─────┘           │
+│                            │           │                  │
+│                            │      Fail │ (strike)        │
+│                            │           ▼                  │
+│                            │    ┌────────────┐           │
+│                            │    │  Warning   │           │
+│                            │    │ (1-2       │           │
+│                            │    │  strikes)  │           │
+│                            │    └──────┬─────┘           │
+│                            │           │                  │
+│                            Pass        │ 3rd strike       │
+│                            │           ▼                  │
+│                            │    ┌────────────┐           │
+│                            └────│  Evicted   │           │
+│                                 │ (bond slash│           │
+│                                 │  + repair) │           │
+│                                 └────────────┘           │
+└──────────────────────────────────────────────────────────┘
+```
+
+### 4.2 Audit Protocol
+
+```
+ Auditor                     Node                    Other Replica
+    │                          │                          │
+    │  Challenge(eid, idx, n)  │                          │
+    │─────────────────────────▶│                          │
+    │                          │  Compute H(ct || nonce)  │
+    │      H(ct || nonce)      │                          │
+    │◀─────────────────────────│                          │
+    │                          │                          │
+    │  Verify against known-good hash                     │
+    │  (fetched from another replica or cached)           │
+    │──────────────────────────────────────────────────▶  │
+    │                          │   H(ct || nonce)         │
+    │◀─────────────────────────────────────────────────── │
+    │                          │                          │
+    │  Match? → PASS           │                          │
+    │  Mismatch/Timeout → FAIL │                          │
+```
+
 ---
 
 ## 5. Transfer Flow (Sequence)
@@ -235,7 +299,7 @@ The Entity Engine is the sender-side component that prepares entities for commit
    │     record to log           │  (Merkle root only,      │
    │     (NO shard_ids)          │   no shard_ids)          │
    │                             │                          │
-   │  7. Generate latticement   │                          │
+   │  7. Generate lattice       │                          │
    │     key (entity_id + CEK    │                          │
    │     + ref + policy)         │                          │
    │  8. Seal key to receiver ──────────────────────────▶  │
@@ -359,3 +423,5 @@ parallel local O(entity/k) fetches, plus amortized fan-out to multiple receivers
 | Commitment log | Merkle DAG / append-only ledger | Immutable, verifiable, decentralizable |
 | Shard placement | Consistent hashing (jump hash) | Deterministic, balanced, minimal disruption |
 | Shard encryption | XChaCha20-Poly1305 | AEAD, fast, nonce-misuse resistant |
+| Storage proofs | Challenge-response (H(ct ‖ nonce)) | Lightweight, no SNARKs/VDFs needed |
+| Node identity | ML-DSA-65 attestation / SPIFFE SVID | Sybil resistance via verifiable identity |
