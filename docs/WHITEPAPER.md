@@ -1,4 +1,4 @@
-# ETP: Entanglement Transfer Protocol — Whitepaper
+# LTP: Lattice Transfer Protocol — Whitepaper
 
 **Version:** 0.1.0-draft  
 **Date:** 2026-02-24  
@@ -6,11 +6,29 @@
 
 ---
 
+### Note on Terminology
+
+The name **"Lattice"** is deliberately chosen for its triple resonance with the protocol's design:
+
+1. **Network lattice** — the distributed commitment nodes form a lattice topology through which
+   shards are placed, replicated, and fetched from the nearest points
+2. **Lattice-based cryptography** — the protocol's post-quantum primitives (ML-KEM-768 and
+   ML-DSA-65) are founded on the hardness of the Module Learning With Errors problem, a
+   lattice problem in algebraic number theory
+3. **Mathematical lattice** — the erasure-coded shard space forms a partially ordered structure
+   where any k-of-n subset is sufficient for reconstruction
+
+The name does **not** imply any connection to quantum entanglement, quantum mechanics, or
+quantum information theory. The protocol operates entirely within classical computing and
+post-quantum cryptography.
+
+---
+
 ## Abstract
 
 We propose a data transfer protocol in which no data payload is transmitted between sender and
 receiver. Instead, the sender **commits** an immutable, content-addressed representation of the
-entity to a distributed commitment layer, transmits a minimal cryptographic **entanglement key**
+entity to a distributed commitment layer, transmits a minimal cryptographic **lattice key**
 to the receiver, and the receiver **materializes** the entity through deterministic reconstruction
 from distributed shards. The protocol achieves:
 
@@ -25,7 +43,7 @@ from distributed shards. The protocol achieves:
 
 ### 1.1 What Is an "Entity"?
 
-In ETP, we do not transfer "files," "packets," or "messages." We transfer **entities**. An entity
+In LTP, we do not transfer "files," "packets," or "messages." We transfer **entities**. An entity
 is any discrete, self-contained unit of state:
 
 - A document
@@ -126,17 +144,17 @@ about the plaintext content — they are hashes of ciphertext.
 The record is the **proof that the entity exists and was committed**. It is small (< 1 KB),
 immutable, and independently verifiable.
 
-### Phase 2: ENTANGLE
+### Phase 2: LATTICE
 
-The sender transmits a minimal **entanglement key** to the receiver. This is the only data
+The sender transmits a minimal **lattice key** to the receiver. This is the only data
 that traverses the sender → receiver path directly.
 
-#### 2.2.1 The Entanglement Key
+#### 2.2.1 The Lattice Key
 
-The entanglement key contains exactly **three secrets** and a policy:
+The lattice key contains exactly **three secrets** and a policy:
 
 ```
-EntanglementKey = {
+LatticeKey = {
   entity_id,              // 32 bytes — which entity to materialize
   content_encryption_key, // 32 bytes — CEK to decrypt shards
   commitment_ref,         // 32 bytes — hash of commitment record
@@ -152,7 +170,7 @@ Critically, the key does **NOT** contain:
 The entire key is **sealed** via ML-KEM-768 (FIPS 203) key encapsulation. Each seal
 operation generates a fresh encapsulation, providing forward secrecy per transfer.
 
-The entanglement key is:
+The lattice key is:
 - **Minimal** — ~160 bytes inner payload, ~1,300 bytes sealed, regardless of entity size
 - **Sealed** — ML-KEM encapsulated to the receiver's encapsulation key (quantum-resistant)
 - **Self-authenticating** — contains the commitment reference for verification
@@ -160,13 +178,13 @@ The entanglement key is:
 - **Opaque** — an interceptor sees only random bytes (no metadata leaks)
 - **Post-quantum** — ML-KEM-768 resists both classical and quantum adversaries
 
-#### 2.2.2 Key Properties of Entanglement
+#### 2.2.2 Key Properties of Latticement
 
-The entanglement key is **not the data**. It is the **proof of right to reconstruct**. This
+The lattice key is **not the data**. It is the **proof of right to reconstruct**. This
 creates several remarkable properties:
 
 1. **Sender→receiver decoupling**: Transferring 1 KB and transferring 1 TB produce the same
-   size sealed entanglement key (~1,300 bytes). The sender→receiver direct transmission is O(1).
+   size sealed lattice key (~1,300 bytes). The sender→receiver direct transmission is O(1).
    Note: total system bandwidth is O(entity × replication) across the commit and materialize
    phases. The advantage is not bandwidth elimination — it is *bottleneck relocation*: the
    sender-receiver path (often the slowest link) is reduced to a constant, and the O(entity)
@@ -181,10 +199,10 @@ creates several remarkable properties:
      ciphertext hashes — no individual shard IDs, no content, no CEK
 
 3. **Non-repudiation**: The commitment record on the append-only log proves the sender committed
-   the entity. The entanglement key proves the sender authorized the receiver. Both are
+   the entity. The lattice key proves the sender authorized the receiver. Both are
    cryptographically signed.
 
-4. **Forward secrecy**: Each entanglement key uses a fresh ML-KEM-768 encapsulation, producing
+4. **Forward secrecy**: Each lattice key uses a fresh ML-KEM-768 encapsulation, producing
    a unique (shared_secret, ciphertext) pair per seal. The shared_secret is used once for AEAD
    encryption and then immediately zeroized. Compromising the receiver's decapsulation key
    after the shared_secret has been destroyed does not expose historical transfers.
@@ -201,12 +219,12 @@ creates several remarkable properties:
 
 ### Phase 3: MATERIALIZE
 
-The receiver uses the entanglement key to **reconstruct** the entity from the commitment layer.
+The receiver uses the lattice key to **reconstruct** the entity from the commitment layer.
 
 #### 2.3.1 Reconstruction Process
 
 ```
-1. Unseal entanglement key with receiver's private key → extract entity_id, CEK, commitment_ref
+1. Unseal lattice key with receiver's private key → extract entity_id, CEK, commitment_ref
 2. Fetch commitment record from append-only log using entity_id
 3. Verify commitment record: H(record) == commitment_ref (integrity check)
 4. Verify commitment record signature (sender authenticity)
@@ -224,13 +242,13 @@ The receiver uses the entanglement key to **reconstruct** the entity from the co
 
 Traditional transfer: **move all the data across one path (sender → receiver)**
 
-ETP materialization: **pull k shards in parallel from the nearest nodes in the commitment network**
+LTP materialization: **pull k shards in parallel from the nearest nodes in the commitment network**
 
 ```
 Traditional:    S ════════════════(entire payload)════════════════> R
                   Bottleneck: sender upload × distance to receiver
 
-ETP:            S ──(~1,300B sealed key)──> R
+LTP:            S ──(~1,300B sealed key)──> R
                                           R <── encrypted shard from nearby Node
                                           R <── encrypted shard from nearby Node
                                           R <── encrypted shard from nearby Node
@@ -240,7 +258,7 @@ ETP:            S ──(~1,300B sealed key)──> R
 
 **Important nuance:** The total bytes moved across the system is *greater* than direct
 transfer — the commit phase uploads O(entity × replication_factor) to the network, and the
-materialize phase downloads O(entity) from it. ETP does not eliminate bandwidth; it
+materialize phase downloads O(entity) from it. LTP does not eliminate bandwidth; it
 **relocates the bottleneck**:
 
 - The sender→receiver path (often the slowest, highest-latency link) shrinks to O(1)
@@ -260,22 +278,22 @@ whereas direct transfer costs O(entity × receiver_count).
 
 | Threat | Mitigation |
 |--------|-----------|
-| Man-in-the-middle intercepts entanglement key | Entire key is sealed (envelope-encrypted) to receiver's public key; interceptor sees opaque ciphertext with zero metadata |
+| Man-in-the-middle intercepts lattice key | Entire key is sealed (envelope-encrypted) to receiver's public key; interceptor sees opaque ciphertext with zero metadata |
 | Attacker scrapes commitment log | Log contains only Merkle root of encrypted shard hashes — no shard IDs, no content, no CEK |
 | Attacker fetches shards from nodes | Shards are AEAD-encrypted with CEK; without CEK, ciphertext is computationally useless |
 | Attacker compromises < k nodes | Information-theoretic security: < k shards (even decrypted) reveal zero information about the entity |
 | Sender denies transfer occurred | Commitment record is on immutable append-only log with sender's signature |
 | Receiver claims different data was sent | Entity ID is deterministic hash of content; both parties can verify |
-| Replay attack (re-use entanglement key) | Access policy can enforce one-time materialization; commitment nodes track access |
+| Replay attack (re-use lattice key) | Access policy can enforce one-time materialization; commitment nodes track access |
 | Quantum computing threat | **Full post-quantum security**: ML-KEM-768 (FIPS 203) for key encapsulation, ML-DSA-65 (FIPS 204) for signatures, BLAKE2b/BLAKE3 for hashing (quantum-resistant), erasure coding is information-theoretic (quantum-immune). No X25519 or Ed25519 in the protocol. |
 
 ### 3.2 Zero-Knowledge Transfer Mode
 
-For maximum privacy, ETP supports a zero-knowledge variant where:
+For maximum privacy, LTP supports a zero-knowledge variant where:
 
 1. The commitment record is encrypted; only the entity_id is public
 2. Shard content is encrypted with a key derived from the entity_id + sender's secret
-3. The receiver's entanglement key includes the decryption material
+3. The receiver's lattice key includes the decryption material
 4. Commitment nodes store shards but **cannot read them**
 5. A ZK-proof accompanies the commitment record proving the entity satisfies certain properties
    (e.g., "this is a valid JSON document" or "this number is in range [0, 1000]") without
@@ -292,7 +310,7 @@ without seeing the data."
 
 ### 4.1 Why Immutability Is Inherent
 
-ETP doesn't "add" immutability as a feature. Immutability is a **consequence of the design**:
+LTP doesn't "add" immutability as a feature. Immutability is a **consequence of the design**:
 
 1. **Entity IDs are content-addressed**: Changing one bit changes the EntityID. There is no way
    to modify an entity and keep the same identity.
@@ -303,7 +321,7 @@ ETP doesn't "add" immutability as a feature. Immutability is a **consequence of 
 3. **Shards are content-addressed**: A commitment node cannot alter a shard without invalidating
    its ShardID, which would be detected at reconstruction.
 
-4. **Entanglement keys reference specific commitments**: The receiver always materializes the
+4. **Lattice keys reference specific commitments**: The receiver always materializes the
    exact entity the sender committed. There is no opportunity for mutation in transit.
 
 ### 4.2 Versioning vs. Mutation
@@ -330,9 +348,9 @@ actually "appending a new version." The full history is always auditable.
 ### 5.1 Latency
 
 **Traditional**: Latency = f(distance, hops, payload_size)  
-**ETP**: Latency = f(key_transmission) + f(nearest_shard_fetch)
+**LTP**: Latency = f(key_transmission) + f(nearest_shard_fetch)
 
-The sealed entanglement key is ~1,300 bytes (increased from ~240 bytes pre-quantum due to
+The sealed lattice key is ~1,300 bytes (increased from ~240 bytes pre-quantum due to
 ML-KEM-768 ciphertext overhead — the honest cost of quantum resistance). Its transmission
 is near-instantaneous on any network. Shard fetching is parallelized from the nearest nodes.
 
@@ -352,7 +370,7 @@ path.
 **Traditional**: New York → Tokyo = ~200ms RTT minimum (speed of light through fiber).  
 For a 1 GB file at 100 Mbps effective throughput: ~80 seconds, bottlenecked by the single path.
 
-**ETP**: The sender in New York transmits a ~1,300-byte sealed key to the receiver in Tokyo
+**LTP**: The sender in New York transmits a ~1,300-byte sealed key to the receiver in Tokyo
 (one round trip, ~200ms). The receiver then fetches k encrypted shards in parallel from
 Tokyo-local commitment nodes (~5-10ms RTT each). Materialization time is dominated by
 *local bandwidth*, not transoceanic latency.
@@ -372,7 +390,7 @@ bandwidth is higher than direct transfer. The advantage appears in:
 
 **Traditional**: Sender must serialize, compress, encrypt, and transmit. Receiver must receive,
 decrypt, decompress, and deserialize. Both need sufficient compute.  
-**ETP**: The heavy work (erasure encoding, shard distribution) is done once at commit time and
+**LTP**: The heavy work (erasure encoding, shard distribution) is done once at commit time and
 can be offloaded to the commitment network. Materialization (erasure decoding from k shards) is
 computationally lightweight and highly parallelizable.
 
@@ -388,7 +406,7 @@ Let:
 
 **Bandwidth costs:**
 
-| Metric | Direct Transfer | ETP |
+| Metric | Direct Transfer | LTP |
 |--------|----------------|-----|
 | Sender upload (per transfer) | $D$ | — (already committed) |
 | Sender upload (commit, once) | — | $D \cdot r$ |
@@ -400,12 +418,12 @@ Let:
 
 **Key formula — total system bandwidth:**
 
-$$B_{ETP}(N) = D \cdot r + D \cdot N$$
+$$B_{LTP}(N) = D \cdot r + D \cdot N$$
 $$B_{direct}(N) = D \cdot N$$
 
-For $N = 1$: $B_{ETP} = D(r+1) > D = B_{direct}$. **ETP is strictly worse for single-transfer bandwidth.**
+For $N = 1$: $B_{LTP} = D(r+1) > D = B_{direct}$. **LTP is strictly worse for single-transfer bandwidth.**
 
-For $N > r$: $B_{ETP} \approx D \cdot N \approx B_{direct}$. **ETP amortizes to parity.**
+For $N > r$: $B_{LTP} \approx D \cdot N \approx B_{direct}$. **LTP amortizes to parity.**
 
 For large $N$: The commit cost $D \cdot r$ becomes negligible. Each additional receiver costs only
 $D$ (local shard fetches) + ~1,300 bytes (sealed key). Sender bandwidth is constant after commit.
@@ -414,21 +432,21 @@ $D$ (local shard fetches) + ~1,300 bytes (sealed key). Sender bandwidth is const
 
 $$T_{direct} = L_{SR} + \frac{D}{\text{bandwidth}_{SR}}$$
 
-$$T_{ETP} = \underbrace{\frac{1300}{\text{bandwidth}_{SR}}}_{\text{key (negligible)}} + \underbrace{\frac{D/k}{\text{bandwidth}_{RN}}}_{\text{k parallel shard fetches}}$$
+$$T_{LTP} = \underbrace{\frac{1300}{\text{bandwidth}_{SR}}}_{\text{key (negligible)}} + \underbrace{\frac{D/k}{\text{bandwidth}_{RN}}}_{\text{k parallel shard fetches}}$$
 
 When $\text{bandwidth}_{RN} \gg \text{bandwidth}_{SR}$ (receiver is near commitment nodes but far from
-sender), $T_{ETP} \ll T_{direct}$. This is the latency advantage.
+sender), $T_{LTP} \ll T_{direct}$. This is the latency advantage.
 
-When $\text{bandwidth}_{RN} \approx \text{bandwidth}_{SR}$ (everything is equidistant), $T_{ETP} \approx T_{direct}$
+When $\text{bandwidth}_{RN} \approx \text{bandwidth}_{SR}$ (everything is equidistant), $T_{LTP} \approx T_{direct}$
 but with the sender free to go offline.
 
-**Where ETP wins honestly:**
+**Where LTP wins honestly:**
 1. Fan-out: $N$ receivers for near-constant sender cost
 2. Latency: receiver-local fetches vs. sender-distance fetches
 3. Sender-independence: sender contributes zero bandwidth after commit
 4. Availability: shards survive sender going offline
 
-**Where ETP loses honestly:**
+**Where LTP loses honestly:**
 1. Single-transfer bandwidth: $r+1$ times worse than direct
 2. Storage: the commitment network stores $D \cdot r$ bytes persistently
 3. Complexity: three-phase protocol vs. one-phase direct send
@@ -437,7 +455,7 @@ but with the sender free to go offline.
 
 ## 6. Comparison with Existing Approaches
 
-| Property | TCP/IP | IPFS | BitTorrent | Tahoe-LAFS | Storj | **ETP** |
+| Property | TCP/IP | IPFS | BitTorrent | Tahoe-LAFS | Storj | **LTP** |
 |----------|--------|------|-----------|------------|-------|---------|
 | Payload travels sender→receiver | Yes | Partial | Partial | No | No | **No** |
 | Content-addressed | No | Yes | Partial | Yes | Yes | **Yes** |
@@ -456,18 +474,18 @@ but with the sender free to go offline.
 | Deterministic shard placement | No | DHT | DHT peers | Server-assigned | Server-assigned | **Consistent hash** |
 | Append-only audit log | No | No | No | No | No | **Yes** |
 
-**Reading guide:** ETP's unique cells (only ETP has "Yes") are: O(1) sender→receiver path,
+**Reading guide:** LTP's unique cells (only LTP has "Yes") are: O(1) sender→receiver path,
 receiver-bound capabilities, per-message PQ forward secrecy, PQ-signed append-only audit log,
 and ZK privacy mode. The encrypted storage, erasure coding, and capability-based access that
-ETP shares with Tahoe-LAFS and Storj are acknowledged as prior art — see Section 7.
+LTP shares with Tahoe-LAFS and Storj are acknowledged as prior art — see Section 7.
 
 ---
 
 ## 7. Related Work and Prior Art
 
-ETP is not built in a vacuum. Its design draws from, recombines, and extends ideas pioneered by
+LTP is not built in a vacuum. Its design draws from, recombines, and extends ideas pioneered by
 decades of work in distributed systems, cryptography, and peer-to-peer networking. This section
-honestly acknowledges the lineage and articulates what — if anything — ETP contributes beyond
+honestly acknowledges the lineage and articulates what — if anything — LTP contributes beyond
 its predecessors.
 
 ### 7.1 Content-Addressed Storage
@@ -481,13 +499,13 @@ have fetched a block can re-serve it, creating BitTorrent-like swarming.
 content hashes (SHA-1, now SHA-256). Every commit, tree, and blob is content-addressed, making
 the history immutable and independently verifiable.
 
-**What ETP borrows:** Content-addressing as the identity function (`EntityID = H(content || ...)`).
+**What LTP borrows:** Content-addressing as the identity function (`EntityID = H(content || ...)`).
 This is not novel — it is a direct application of the same principle.
 
-**Where ETP diverges:** In IPFS, any peer with the CID can fetch the content; there is no built-in
-access control. In ETP, knowing the `entity_id` is insufficient — the receiver also needs the
-Content Encryption Key (CEK), which is sealed inside the entanglement key. IPFS retrieval is
-*permissionless*; ETP materialization is *capability-gated*. Additionally, ETP encrypts all shards
+**Where LTP diverges:** In IPFS, any peer with the CID can fetch the content; there is no built-in
+access control. In LTP, knowing the `entity_id` is insufficient — the receiver also needs the
+Content Encryption Key (CEK), which is sealed inside the lattice key. IPFS retrieval is
+*permissionless*; LTP materialization is *capability-gated*. Additionally, LTP encrypts all shards
 at rest (AEAD with CEK), whereas IPFS blocks are stored and served in plaintext by default.
 
 ### 7.2 Erasure-Coded Distributed Storage
@@ -504,21 +522,21 @@ and distributed to independent operators. Access grants (serialized macaroons) a
 
 **Filecoin (2020)** [5] extends IPFS with cryptoeconomic guarantees: storage providers submit
 Proofs of Replication and Proofs of Spacetime to demonstrate that data is physically stored.
-This addresses the data availability problem that ETP's Section 8 (Open Questions) leaves open.
+This addresses the data availability problem that LTP's Section 8 (Open Questions) leaves open.
 
-**What ETP borrows:** Erasure coding for redundancy and threshold reconstruction (k-of-n); client-side
+**What LTP borrows:** Erasure coding for redundancy and threshold reconstruction (k-of-n); client-side
 encryption before distribution; the property that storage nodes cannot read content.
 
-**Where ETP diverges:** Tahoe-LAFS, Storj, and Filecoin are *storage systems* — they address "how
-do I store data durably on untrusted nodes?" ETP frames the same infrastructure as a *transfer
+**Where LTP diverges:** Tahoe-LAFS, Storj, and Filecoin are *storage systems* — they address "how
+do I store data durably on untrusted nodes?" LTP frames the same infrastructure as a *transfer
 protocol* — the question is "how does entity X get from sender A to receiver B," with the storage
 layer as an intermediate step rather than the end goal. The distinction is one of framing and
-protocol-level abstraction: ETP's three-phase model (commit → entangle → materialize) treats
+protocol-level abstraction: LTP's three-phase model (commit → lattice → materialize) treats
 the distributed storage as a side-effect of the commit phase, not as the primary interface.
 
 Whether this framing is a meaningful contribution or merely a relabeling is a fair question.
 We argue the value lies in the protocol-level UX: the sender thinks in terms of "commit and
-entangle," not "upload to storage provider and share access grant." The operational semantics
+lattice," not "upload to storage provider and share access grant." The operational semantics
 differ even if the underlying mechanisms are similar.
 
 ### 7.3 Append-Only Commitment Logs
@@ -535,13 +553,13 @@ operator (or multiple operators for cross-verification) rather than decentralize
 permissionless blockchains — permissioned channels with endorsement policies can achieve
 immutability with lower latency and without proof-of-work.
 
-**What ETP borrows:** The commitment log is a direct application of these ideas. The whitepaper
+**What LTP borrows:** The commitment log is a direct application of these ideas. The whitepaper
 deliberately does not specify a consensus mechanism (Section 8, Open Question 3) — it could be
 a blockchain, a CT-style Merkle log, or a permissioned ledger. The immutability guarantee
 (Section 4) relies only on the append-only property and hash chaining, not on a specific
 consensus protocol.
 
-**Where ETP diverges:** ETP's commitment log is minimal by design: it stores only a Merkle root
+**Where LTP diverges:** LTP's commitment log is minimal by design: it stores only a Merkle root
 of encrypted shard hashes, the entity_id, encoding params, and an ML-DSA signature. No shard
 IDs, no content, no CEK. This is a tighter interface than most blockchain-based systems, which
 tend to store more metadata. The log's purpose is *attestation* ("this entity was committed by
@@ -561,13 +579,13 @@ Storj uses serialized macaroons as its access grant format.
 **SPIFFE/SPIRE (2017+)** [11] provides workload identity in distributed systems via short-lived
 X.509 certificates (SVIDs), enabling zero-trust service-to-service authentication.
 
-**What ETP borrows:** The entanglement key is a capability. It designates a resource (the
+**What LTP borrows:** The lattice key is a capability. It designates a resource (the
 committed entity) and authorizes a specific receiver to materialize it. The `access_policy`
 field (one-time, time-bounded, delegatable) is directly inspired by macaroon caveats.
 
-**Where ETP diverges:** The entanglement key combines capability semantics with envelope
-encryption (ML-KEM). A Storj access grant can be used by anyone who possesses it; an ETP
-entanglement key is sealed to a specific receiver's encapsulation key and is useless to anyone
+**Where LTP diverges:** The lattice key combines capability semantics with envelope
+encryption (ML-KEM). A Storj access grant can be used by anyone who possesses it; an LTP
+lattice key is sealed to a specific receiver's encapsulation key and is useless to anyone
 else. This binds the capability to a cryptographic identity, not just to possession.
 
 ### 7.5 Peer-to-Peer Content Distribution
@@ -576,21 +594,21 @@ else. This binds the capability to a cryptographic identity, not just to possess
 the original seeder uploads once, and peers exchange pieces among themselves. The more popular
 a file becomes, the faster it distributes (unlike client-server, where popularity causes
 congestion). BitTorrent's piece model (splitting content into fixed-size chunks distributed
-across peers) is an ancestor of ETP's shard model.
+across peers) is an ancestor of LTP's shard model.
 
 **NDN (Named Data Networking, 2009+)** [13] proposes replacing IP's host-centric architecture
 with data-centric networking: consumers request data by name, and any node that has a cached
 copy can serve it. The network layer itself becomes content-addressed. NDN's "fetch from
-wherever is closest" philosophy directly parallels ETP's receiver-side materialization from
+wherever is closest" philosophy directly parallels LTP's receiver-side materialization from
 nearest commitment nodes.
 
-**What ETP borrows:** Parallel multi-source fetching (from BitTorrent/NDN), the principle that
+**What LTP borrows:** Parallel multi-source fetching (from BitTorrent/NDN), the principle that
 the first upload is the expensive operation and subsequent retrievals amortize the cost, and
 the idea that content should flow from where it is cached rather than from a fixed origin.
 
-**Where ETP diverges:** BitTorrent has no built-in encryption or access control — torrents are
-public by default. NDN's data-centric model operates at the network layer, while ETP is an
-application-layer protocol. ETP's commitment phase is a one-time sender operation (not a
+**Where LTP diverges:** BitTorrent has no built-in encryption or access control — torrents are
+public by default. NDN's data-centric model operates at the network layer, while LTP is an
+application-layer protocol. LTP's commitment phase is a one-time sender operation (not a
 continuous seeding obligation), and the commitment network serves encrypted shards without
 needing to understand or index the content.
 
@@ -598,42 +616,42 @@ needing to understand or index the content.
 
 Several systems have independently converged on similar combinations:
 
-**Tahoe-LAFS + Capability Model** arguably comes closest to ETP's design: encrypted erasure-coded
-storage with capability-based access. ETP's main departure is the protocol framing (transfer vs.
+**Tahoe-LAFS + Capability Model** arguably comes closest to LTP's design: encrypted erasure-coded
+storage with capability-based access. LTP's main departure is the protocol framing (transfer vs.
 storage), the ML-KEM sealed envelope (binding capabilities to a specific receiver), and the
 explicit three-phase model with an append-only commitment log.
 
 **Keybase (2014-2020)** [14] combined KBFS (an encrypted, content-addressed filesystem) with
 public-key identity and Merkle-tree-based audit logs. Users could share files by name, with
-client-side encryption and server-side ignorance — similar to ETP's "nodes store ciphertext."
+client-side encryption and server-side ignorance — similar to LTP's "nodes store ciphertext."
 
 **Secure Scuttlebutt (SSB, 2014+)** [15] uses append-only logs per identity, with content-
 addressed messages and capability-based private groups. SSB's offline-first design (gossip
-replication, no central server) parallels ETP's sender-independence property.
+replication, no central server) parallels LTP's sender-independence property.
 
-### 7.7 What ETP Contributes
+### 7.7 What LTP Contributes
 
-Given the depth of prior art, the honest answer is: **ETP's individual components are not novel.
+Given the depth of prior art, the honest answer is: **LTP's individual components are not novel.
 Its contribution is the protocol-level synthesis.**
 
 Specifically:
 
-1. **The three-phase model (commit → entangle → materialize) as a transfer primitive.** Prior
-   systems treat content-addressed storage + capabilities as *storage with sharing*. ETP treats
+1. **The three-phase model (commit → lattice → materialize) as a transfer primitive.** Prior
+   systems treat content-addressed storage + capabilities as *storage with sharing*. LTP treats
    the combination as *a data transfer protocol* — an alternative to sending payloads. This is
    primarily a conceptual contribution. Whether it proves practically valuable depends on
    whether the abstraction enables workflows that existing tools make awkward.
 
-2. **The sealed entanglement key as a constant-size, receiver-bound, post-quantum transfer
+2. **The sealed lattice key as a constant-size, receiver-bound, post-quantum transfer
    token.** Unlike Storj access grants (bearer tokens, anyone who holds them can use them),
-   the entanglement key is cryptographically bound to a specific receiver via ML-KEM-768.
-   Unlike Tahoe-LAFS read-caps (static, no expiry built-in), the entanglement key includes
+   the lattice key is cryptographically bound to a specific receiver via ML-KEM-768.
+   Unlike Tahoe-LAFS read-caps (static, no expiry built-in), the lattice key includes
    inline access policy (one-time, time-bounded, delegatable) and uses per-seal forward
    secrecy. The combination of capability + receiver binding + per-message forward secrecy +
    inline policy in a constant-size token is, to our knowledge, not present in prior systems.
 
 3. **Deterministic receiver-side location derivation.** In IPFS and Storj, the provider/sharer
-   must communicate block CIDs or shard locations to the receiver explicitly. In ETP, the
+   must communicate block CIDs or shard locations to the receiver explicitly. In LTP, the
    receiver computes shard locations from the entity_id via consistent hashing — no lookup
    service, no external metadata. This eliminates one round-trip and one point of failure.
 
@@ -685,29 +703,29 @@ that reasonable reviewers may disagree.
 
 ### 8.1 Large File Fan-Out
 A 50 GB dataset is committed once. Any number of receivers can materialize it by each receiving
-a ~1,300-byte sealed entanglement key (ML-KEM-768). Each receiver's materialization time is
+a ~1,300-byte sealed lattice key (ML-KEM-768). Each receiver's materialization time is
 dominated by local shard fetching from nearby nodes — not by the sender's bandwidth or
-availability. For N receivers, direct transfer costs O(50GB × N). ETP costs O(50GB ×
+availability. For N receivers, direct transfer costs O(50GB × N). LTP costs O(50GB ×
 replication) for the commit plus O(~1,300B × N) for the keys — amortized cost per receiver
 approaches zero as N grows.
 
 ### 8.2 Immutable Audit Trail
 Every data transfer is permanently recorded. A compliance system can verify: "Entity X was
-committed by Sender A at time T and entangled with Receiver B." No party can deny or alter this.
+committed by Sender A at time T and lattice-linked with Receiver B." No party can deny or alter this.
 
 ### 8.3 Secure Messaging
-A message is committed and entangled. The entanglement key is the message notification. The
+A message is committed and lattice-linked. The lattice key is the message notification. The
 content never traverses the public internet as a readable payload. Even if intercepted, the
-entanglement key alone is useless.
+lattice key alone is useless.
 
 ### 8.4 State Synchronization
-Two distributed systems synchronize state by exchanging entanglement keys. Each system materializes
+Two distributed systems synchronize state by exchanging lattice keys. Each system materializes
 the other's state from the commitment network. This is faster than traditional replication because
 shards are fetched locally, and only the delta (new entity) needs materialization.
 
 ### 8.5 Cross-Planetary Data Transfer
 On a Mars colony with 4-24 minute light delay to Earth: commitment nodes on Mars cache shards.
-A sender on Earth commits an entity. The ~1,300-byte sealed entanglement key crosses the void
+A sender on Earth commits an entity. The ~1,300-byte sealed lattice key crosses the void
 once (4-24 minutes). The receiver on Mars materializes from Mars-local commitment nodes (which
 replicate shards during off-peak periods). Materialization time is bounded by Mars-local network
 speed, not Earth-Mars light delay. Note: initial shard replication to Mars nodes still incurs
@@ -725,14 +743,14 @@ and can happen asynchronously before any specific transfer.
    full BFT, or is a lighter mechanism sufficient?)
 4. **Bandwidth for initial shard distribution**: The commit phase still requires distributing n 
    shards. Can this be amortized or pipelined?
-5. **Real-time streaming**: Can ETP support continuous entity streams (video, telemetry), or is it
+5. **Real-time streaming**: Can LTP support continuous entity streams (video, telemetry), or is it
    inherently batch-oriented?
 
 ---
 
 ## 10. Conclusion
 
-ETP inverts the data transfer paradigm. Rather than asking "how do I send this data to you," it
+LTP inverts the data transfer paradigm. Rather than asking "how do I send this data to you," it
 asks "how do I prove this data exists, and give you the right to reconstruct it near you."
 
 The result is a protocol where:
@@ -749,4 +767,4 @@ Bandwidth doesn't disappear. It redistributes to where it's cheapest.
 
 ---
 
-*ETP v0.1.0-draft — Entanglement Transfer Protocol*
+*LTP v0.1.0-draft — Lattice Transfer Protocol*

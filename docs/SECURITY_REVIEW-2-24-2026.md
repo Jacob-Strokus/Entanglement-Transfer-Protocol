@@ -1,4 +1,4 @@
-# ETP Security Review & Mathematical Analysis
+# LTP Security Review & Mathematical Analysis
 
 **Reviewer:** Internal Adversarial Review  
 **Date:** 2026-02-24  
@@ -84,11 +84,11 @@ is one of the strongest claims in the paper.**
 
 ## 2. What Is Cryptographically BROKEN or Overclaimed
 
-### 2.1 CRITICAL: The Entanglement Key Contains Shard IDs (Information Leak)
+### 2.1 CRITICAL: The Lattice Key Contains Shard IDs (Information Leak)
 
 **This is the most serious flaw in the current design.**
 
-The entanglement key currently includes:
+The lattice key currently includes:
 
 ```json
 {
@@ -101,7 +101,7 @@ The entanglement key currently includes:
 }
 ```
 
-**The attack:** An attacker who intercepts the entanglement key (even without the receiver's
+**The attack:** An attacker who intercepts the lattice key (even without the receiver's
 private key) now knows:
 - The entity_id (which references the public commitment log)
 - ALL shard IDs
@@ -113,14 +113,14 @@ With shard IDs in hand, the attacker can:
 2. Fetch shards directly from commitment nodes (if nodes don't enforce access control)
 3. Reconstruct the entity via erasure decoding
 
-**The whitepaper claims the entanglement key is "useless without the receiver's private key,"
+**The whitepaper claims the lattice key is "useless without the receiver's private key,"
 but the PoC implementation does NOT encrypt anything.** The key is plaintext JSON. Even the
 whitepaper spec only encrypts `receiver_decryption_material` — the shard IDs, entity ID, and
 encoding params are metadata that, combined with a public commitment network, may be sufficient
 to reconstruct.
 
 **Fix required:**
-- The entanglement key must be **entirely encrypted** to the receiver's public key (not just
+- The lattice key must be **entirely encrypted** to the receiver's public key (not just
   the decryption material)
 - Shard content must be encrypted; commitment nodes must store ciphertext
 - Commitment nodes must enforce access control (authenticate the receiver before serving shards)
@@ -132,7 +132,7 @@ to reconstruct.
 
 The paper claims:
 
-> "Transferring 1 KB and transferring 1 TB produce the same size entanglement key (~512 bytes)"
+> "Transferring 1 KB and transferring 1 TB produce the same size lattice key (~512 bytes)"
 
 **This is technically true for the key itself, but profoundly misleading** because:
 
@@ -172,7 +172,7 @@ The paper states:
 - Reed-Solomon threshold security is information-theoretic (quantum-immune)
 
 **What doesn't hold:**
-- The entanglement key uses X25519 key exchange, which is **broken by quantum computers**
+- The lattice key uses X25519 key exchange, which is **broken by quantum computers**
   (Shor's algorithm solves ECDLP in polynomial time)
 - Ed25519 signatures are **broken by quantum computers** (same reason)
 - The paper mentions Dilithium as an option but doesn't make it the default
@@ -198,8 +198,8 @@ under-specified.
 
 ### 3.1 "This Is Just IPFS + Access Control"
 
-**Expected critique:** "ETP is content-addressed distributed storage (IPFS) plus an access
-control layer (entanglement keys) plus an immutable log (blockchain). What is genuinely novel?"
+**Expected critique:** "LTP is content-addressed distributed storage (IPFS) plus an access
+control layer (lattice keys) plus an immutable log (blockchain). What is genuinely novel?"
 
 **Honest assessment:** This critique has merit. The individual components are well-known:
 - Content-addressed storage → IPFS, CAS systems (2014+)
@@ -208,18 +208,18 @@ control layer (entanglement keys) plus an immutable log (blockchain). What is ge
 - Small capability tokens that grant access → Capability-based security (1966+)
 
 **What is arguably novel:**
-- The specific combination and the "entanglement key" abstraction as the transfer primitive
+- The specific combination and the "lattice key" abstraction as the transfer primitive
 - The framing of "transfer as proof, not payload" as a protocol-level concept
 - The deterministic placement allowing receiver-side computation without a lookup service
 
 **Fix required:** Add a "Related Work" section that honestly cites IPFS, Storj, Filecoin,
 BitTorrent, Certificate Transparency, and capability-based security. Then clearly articulate
-what ETP's specific contribution is beyond combining these.
+what LTP's specific contribution is beyond combining these.
 
-### 3.2 The Name "Entanglement" Is Misleading
+### 3.2 The Name "Latticement" Is Misleading
 
-"Entanglement" has a precise meaning in quantum physics (non-local correlations between
-quantum states). ETP has nothing to do with quantum entanglement. Using this term will:
+"Latticement" has a precise meaning in quantum physics (non-local correlations between
+quantum states). LTP has nothing to do with quantum latticement. Using this term will:
 - Attract criticism from physicists
 - Be seen as "quantum-washing" / hype
 - Undermine credibility
@@ -304,9 +304,9 @@ security of the signature scheme, no PPT adversary can forge a commitment record
 
 ---
 
-## 5. Comparison: ETP vs. What Already Exists
+## 5. Comparison: LTP vs. What Already Exists
 
-| Claimed ETP Property | Already Exists In | Is ETP Different? |
+| Claimed LTP Property | Already Exists In | Is LTP Different? |
 |---------------------|-------------------|-------------------|
 | Content-addressed storage | IPFS (2015), Git (2005) | No |
 | Erasure-coded distribution | Storj (2018), Tahoe-LAFS (2007) | No |
@@ -315,7 +315,7 @@ security of the signature scheme, no PPT adversary can forge a commitment record
 | "Proof of right to reconstruct" | Storj access grants | Very similar |
 | Combined into single clean protocol | **This is the novel part** | **Yes** |
 
-The novelty is the **protocol-level unification** and the **mental model** (commit-entangle-
+The novelty is the **protocol-level unification** and the **mental model** (commit-lattice-
 materialize), not the individual components.
 
 ---
@@ -324,14 +324,14 @@ materialize), not the individual components.
 
 ### Must Fix (Blockers)
 
-1. **Encrypt the entire entanglement key**, not just decryption material. The current design
+1. **Encrypt the entire lattice key**, not just decryption material. The current design
    leaks shard IDs and entity structure to any interceptor.
 
 2. **Remove or heavily qualify the "size-invariant transfer" claim.** Reframe as "the
    sender-receiver direct path is O(1)" while acknowledging total system bandwidth is O(n).
 
 3. **Add a Related Work section** citing IPFS, Storj, Filecoin, Tahoe-LAFS, BitTorrent,
-   Certificate Transparency, and capability-based security. Clearly state what ETP unifies.
+   Certificate Transparency, and capability-based security. Clearly state what LTP unifies.
 
 4. **Add formal security definitions** (IND-CPA for confidentiality, EUF-CMA for integrity,
    define the security game for "transfer immutability").
@@ -341,7 +341,7 @@ materialize), not the individual components.
 
 ### Should Fix (Strengtheners)
 
-6. **Rename or disclaim "Entanglement"** — the quantum terminology will attract dismissal.
+6. **Rename or disclaim "Latticement"** — the quantum terminology will attract dismissal.
 
 7. **Specify the commitment log consensus mechanism** — the paper hand-waves "blockchain,
    Merkle DAG, or any immutable append-only structure" without committing. Reviewers will
@@ -358,7 +358,7 @@ materialize), not the individual components.
 ### Nice to Have (Polish)
 
 11. Formal TLA+ or Alloy model of the protocol state machine
-12. Simulation results comparing ETP latency to direct transfer under various topologies
+12. Simulation results comparing LTP latency to direct transfer under various topologies
 13. Threat model diagram (attacker capabilities taxonomy)
 
 ---
@@ -374,12 +374,12 @@ materialize), not the individual components.
 | Immutability claims | **Strong** | Multiple layers of provable immutability |
 | Reversibility of transfer | **Provably impossible** | Content-addressing + append-only + signatures make reversal computationally infeasible |
 | Publication readiness | **Not yet** | 4-5 blocking issues to resolve first |
-| Hackability | **Moderate risk** | The entanglement key leak is exploitable; fix it and the risk drops to Low |
+| Hackability | **Moderate risk** | The lattice key leak is exploitable; fix it and the risk drops to Low |
 | Mathematical foundation | **Partially provable** | Immutability, integrity, threshold secrecy are provable. Performance claims are not. |
 
 **Bottom line:** The protocol is built on sound cryptographic foundations. The core immutability
 and threshold secrecy properties are mathematically provable. But the whitepaper makes several
-claims that don't survive scrutiny, and the entanglement key design has a real security gap.
+claims that don't survive scrutiny, and the lattice key design has a real security gap.
 Fix those, add Related Work, and this becomes a legitimate protocol specification.
 
 **Can the transfer be reversed?** No. This is the strongest claim in the paper and it holds:

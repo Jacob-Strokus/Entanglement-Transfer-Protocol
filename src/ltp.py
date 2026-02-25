@@ -1,23 +1,23 @@
 """
-Entanglement Transfer Protocol (ETP) — Proof of Concept v3 (Post-Quantum Security)
+Lattice Transfer Protocol (LTP) — Proof of Concept v3 (Post-Quantum Security)
 
-Implements the three core phases of ETP with post-quantum cryptographic primitives:
+Implements the three core phases of LTP with post-quantum cryptographic primitives:
 
   1. COMMIT   — Entity → Erasure Encode → Encrypt Shards with CEK → Distribute Ciphertext
-  2. ENTANGLE — Generate minimal sealed key (~160B inner, ~1300B sealed) with CEK
+  2. LATTICE — Generate minimal sealed key (~160B inner, ~1300B sealed) with CEK
   3. MATERIALIZE — Unseal key → Derive shard locations → Fetch ciphertext → Decrypt → Reconstruct
 
 Cryptographic primitives:
-  - ML-KEM-768 (FIPS 203 / Kyber) for key encapsulation (sealing entanglement keys)
+  - ML-KEM-768 (FIPS 203 / Kyber) for key encapsulation (sealing lattice keys)
   - ML-DSA-65 (FIPS 204 / Dilithium) for digital signatures (commitment records)
   - BLAKE2b-256 for content-addressing (production: BLAKE3)
   - AEAD (symmetric) for shard encryption and envelope payload encryption
 
 Security properties (Option C + Post-Quantum):
   - Shards encrypted at rest with random Content Encryption Key (CEK)
-  - Entanglement key sealed via ML-KEM encapsulation (quantum-resistant)
+  - Lattice key sealed via ML-KEM encapsulation (quantum-resistant)
   - Commitment records signed with ML-DSA (quantum-resistant signatures)
-  - Shard IDs removed from entanglement key (locations derived from entity_id)
+  - Shard IDs removed from lattice key (locations derived from entity_id)
   - Commitment log stores only Merkle root (no individual shard metadata)
   - Forward secrecy: each seal() generates a fresh ML-KEM encapsulation
   - Three-leak kill chain CLOSED: key sealed, shards encrypted, log minimal
@@ -345,8 +345,8 @@ class KeyPair:
     Post-quantum asymmetric keypair combining ML-KEM-768 and ML-DSA-65.
 
     Contains:
-      - ek (encapsulation key, public): used to seal entanglement keys to this recipient
-      - dk (decapsulation key, private): used to unseal entanglement keys
+      - ek (encapsulation key, public): used to seal lattice keys to this recipient
+      - dk (decapsulation key, private): used to unseal lattice keys
       - vk (verification key, public): used to verify commitment signatures
       - sk (signing key, private): used to sign commitment records
 
@@ -385,7 +385,7 @@ class KeyPair:
 # SealedBox: Post-Quantum Envelope Encryption (ML-KEM-768 + AEAD)
 #
 # Encrypts a payload so that ONLY the holder of the receiver's ML-KEM
-# decapsulation key (dk) can decrypt it. Used to seal the entanglement key.
+# decapsulation key (dk) can decrypt it. Used to seal the lattice key.
 #
 # Protocol:
 #   seal(plaintext, receiver_ek) → kem_ciphertext(1088) || nonce(16) || aead_ct+tag
@@ -831,7 +831,7 @@ class CommitmentNetwork:
 
 @dataclass
 class Entity:
-    """An entity to be transferred via ETP."""
+    """An entity to be transferred via LTP."""
     content: bytes
     shape: str
     metadata: dict = field(default_factory=dict)
@@ -848,13 +848,13 @@ class Entity:
 
 
 # ===========================================================================
-# ENTANGLEMENT KEY — MINIMAL, SEALED (Option C)
+# LATTICE KEY — MINIMAL, SEALED (Option C)
 # ===========================================================================
 
 @dataclass
-class EntanglementKey:
+class LatticeKey:
     """
-    The entanglement key — the ONLY data transmitted sender → receiver.
+    The lattice key — the ONLY data transmitted sender → receiver.
 
     Option C design — contains exactly 3 secrets + policy:
       - entity_id:      which entity to materialize (32-byte hash)
@@ -893,7 +893,7 @@ class EntanglementKey:
         return SealedBox.seal(self._plaintext_payload(), receiver_ek)
 
     @classmethod
-    def unseal(cls, sealed_data: bytes, receiver_keypair: KeyPair) -> 'EntanglementKey':
+    def unseal(cls, sealed_data: bytes, receiver_keypair: KeyPair) -> 'LatticeKey':
         """Unseal with receiver's private key. Raises ValueError if wrong receiver."""
         plaintext = SealedBox.unseal(sealed_data, receiver_keypair)
         d = json.loads(plaintext)
@@ -911,16 +911,16 @@ class EntanglementKey:
 
 
 # ===========================================================================
-# ETP PROTOCOL — OPTION C SECURED
+# LTP PROTOCOL — OPTION C SECURED
 # ===========================================================================
 
-class ETPProtocol:
+class LTPProtocol:
     """
-    Entanglement Transfer Protocol — main protocol orchestrator.
+    Lattice Transfer Protocol — main protocol orchestrator.
 
     Post-quantum security model (Option C + ML-KEM + ML-DSA):
       COMMIT:       encrypt shards with random CEK → distribute ciphertext → ML-DSA sign record
-      ENTANGLE:     seal minimal key (entity_id + CEK + ref) via ML-KEM to receiver
+      LATTICE:     seal minimal key (entity_id + CEK + ref) via ML-KEM to receiver
       MATERIALIZE:  ML-KEM unseal → derive locations → fetch ciphertext → decrypt → decode
     """
 
@@ -1009,9 +1009,9 @@ class ETPProtocol:
 
         return entity_id, record, cek
 
-    # --- PHASE 2: ENTANGLE ---
+    # --- PHASE 2: LATTICE ---
 
-    def entangle(
+    def lattice(
         self,
         entity_id: str,
         record: CommitmentRecord,
@@ -1020,9 +1020,9 @@ class ETPProtocol:
         access_policy: dict = None,
     ) -> bytes:
         """
-        PHASE 2: ENTANGLE
+        PHASE 2: LATTICE
 
-        Create a minimal entanglement key and seal it to the receiver via ML-KEM.
+        Create a minimal lattice key and seal it to the receiver via ML-KEM.
 
         Inner payload (~160 bytes):
           entity_id (64B hex) + CEK (64B hex) + commitment_ref (64B hex) + policy
@@ -1033,11 +1033,11 @@ class ETPProtocol:
         Forward secrecy: each seal() generates a fresh ML-KEM encapsulation.
         The shared secret is used once and zeroized.
 
-        Returns: sealed entanglement key (opaque bytes)
+        Returns: sealed lattice key (opaque bytes)
         """
         commitment_ref = H(json.dumps(record.to_dict(), sort_keys=True).encode())
 
-        key = EntanglementKey(
+        key = LatticeKey(
             entity_id=entity_id,
             cek=cek,
             commitment_ref=commitment_ref,
@@ -1048,16 +1048,16 @@ class ETPProtocol:
         sealed = key.seal(receiver_keypair.ek)
         entity_size = self._entity_sizes.get(entity_id, 0)
 
-        print(f"  [ENTANGLE] Receiver: {receiver_keypair.label} ({receiver_keypair.pub_hex})")
-        print(f"  [ENTANGLE] Inner payload: {inner_size} bytes")
-        print(f"  [ENTANGLE]   Contains: entity_id + CEK + commitment_ref + policy")
-        print(f"  [ENTANGLE]   REMOVED: shard_ids, encoding_params, sender_id")
-        print(f"  [ENTANGLE] Sealed via ML-KEM-768: {len(sealed):,} bytes")
-        print(f"  [ENTANGLE]   kem_ciphertext: {MLKEM.CT_SIZE} bytes (fresh encapsulation)")
-        print(f"  [ENTANGLE]   nonce: 16 bytes | aead_tag: 32 bytes")
-        print(f"  [ENTANGLE]   Forward secrecy: shared_secret zeroized after AEAD encrypt")
+        print(f"  [LATTICE] Receiver: {receiver_keypair.label} ({receiver_keypair.pub_hex})")
+        print(f"  [LATTICE] Inner payload: {inner_size} bytes")
+        print(f"  [LATTICE]   Contains: entity_id + CEK + commitment_ref + policy")
+        print(f"  [LATTICE]   REMOVED: shard_ids, encoding_params, sender_id")
+        print(f"  [LATTICE] Sealed via ML-KEM-768: {len(sealed):,} bytes")
+        print(f"  [LATTICE]   kem_ciphertext: {MLKEM.CT_SIZE} bytes (fresh encapsulation)")
+        print(f"  [LATTICE]   nonce: 16 bytes | aead_tag: 32 bytes")
+        print(f"  [LATTICE]   Forward secrecy: shared_secret zeroized after AEAD encrypt")
         if entity_size > 0:
-            print(f"  [ENTANGLE] Entity: {entity_size:,}B → Key: {len(sealed):,}B "
+            print(f"  [LATTICE] Entity: {entity_size:,}B → Key: {len(sealed):,}B "
                   f"({entity_size / len(sealed):.1f}x ratio)")
 
         return sealed
@@ -1072,13 +1072,13 @@ class ETPProtocol:
         """
         PHASE 3: MATERIALIZE
 
-        1. Unseal entanglement key with receiver's private key
+        1. Unseal lattice key with receiver's private key
         2. Fetch commitment record from log (entity_id from key)
         3. Verify commitment record integrity (hash match)
         4. Read encoding params (n, k) from record
         5. Derive shard locations from entity_id (no shard_ids needed!)
         6. Fetch k-of-n encrypted shards from nearest nodes
-        7. Decrypt each shard with CEK from the entanglement key
+        7. Decrypt each shard with CEK from the lattice key
         8. Erasure decode → original entity content
         9. Verify entity integrity
 
@@ -1088,9 +1088,9 @@ class ETPProtocol:
         print(f"  [MATERIALIZE] Receiver '{label}' beginning materialization...")
         print(f"  [MATERIALIZE] Sealed key size: {len(sealed_key)} bytes")
 
-        # Step 1: Unseal the entanglement key
+        # Step 1: Unseal the lattice key
         try:
-            key = EntanglementKey.unseal(sealed_key, receiver_keypair)
+            key = LatticeKey.unseal(sealed_key, receiver_keypair)
         except ValueError as e:
             print(f"  [MATERIALIZE] ✗ UNSEAL FAILED: {e}")
             return None
@@ -1159,10 +1159,10 @@ class ETPProtocol:
 # ===========================================================================
 
 def demo():
-    """Run a full ETP transfer demo with post-quantum security."""
+    """Run a full LTP transfer demo with post-quantum security."""
 
     print("=" * 74)
-    print("  ENTANGLEMENT TRANSFER PROTOCOL (ETP) v3")
+    print("  LATTICE TRANSFER PROTOCOL (LTP) v3")
     print("  Security: Post-Quantum (ML-KEM-768 + ML-DSA-65 + AEAD)")
     print("=" * 74)
     print()
@@ -1193,12 +1193,12 @@ def demo():
         print(f"  Added commitment node: {node_id} ({region})")
 
     print()
-    protocol = ETPProtocol(network)
+    protocol = LTPProtocol(network)
 
     # --- Transfers ---
     test_cases = [
         ("Small message",
-         b"Hello, this is a secure immutable transfer via ETP!",
+         b"Hello, this is a secure immutable transfer via LTP!",
          "text/plain"),
         ("JSON document",
          json.dumps({
@@ -1228,14 +1228,14 @@ def demo():
         entity_id, record, cek = protocol.commit(entity, alice, n=8, k=4)
         print("└─ ✓ Committed\n")
 
-        # PHASE 2: ENTANGLE
-        print("┌─ PHASE 2: ENTANGLE (Alice → Bob, ML-KEM sealed)")
-        sealed_key = protocol.entangle(
+        # PHASE 2: LATTICE
+        print("┌─ PHASE 2: LATTICE (Alice → Bob, ML-KEM sealed)")
+        sealed_key = protocol.lattice(
             entity_id, record, cek, bob,
             access_policy={"type": "one-time", "expires": "2026-03-24"}
         )
-        print(f"  [ENTANGLE] ═══ SEALED KEY (ML-KEM-768): {len(sealed_key):,} bytes ═══")
-        print("└─ ✓ Entangled\n")
+        print(f"  [LATTICE] ═══ SEALED KEY (ML-KEM-768): {len(sealed_key):,} bytes ═══")
+        print("└─ ✓ Lattice key sealed\n")
 
         print("  ⚡ Alice goes offline. Transfer continues without her.\n")
 
@@ -1303,7 +1303,7 @@ def demo():
     print()
     print("  BANDWIDTH COST MODEL (honest accounting):")
     print("  ┌─────────────────────────┬────────────────┬─────────────────────┐")
-    print("  │ Metric                  │ Direct Transfer│ ETP                 │")
+    print("  │ Metric                  │ Direct Transfer│ LTP                 │")
     print("  ├─────────────────────────┼────────────────┼─────────────────────┤")
     print("  │ Sender→Receiver path    │ O(entity)      │ O(1) ~1,300 bytes   │")
     print("  │ Total system (1 recv)   │ O(entity)      │ O(entity × (r+1))   │")

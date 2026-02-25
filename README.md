@@ -1,4 +1,4 @@
-# Entanglement Transfer Protocol (ETP)
+# Lattice Transfer Protocol (LTP)
 
 ### A Novel Data Transfer Protocol
 
@@ -18,7 +18,7 @@ This assumption chains us to three unsolvable constraints:
 2. **Geography** — further = slower, always
 3. **Compute** — larger payloads demand more processing at both ends
 
-ETP rejects this assumption entirely.
+LTP rejects this assumption entirely.
 
 ---
 
@@ -27,12 +27,12 @@ ETP rejects this assumption entirely.
 **Data transfer is not about moving bits. It is about transferring the *ability to reconstruct* a
 deterministic output at a destination, verified by an immutable commitment.**
 
-An ETP transfer consists of three atomic operations:
+An LTP transfer consists of three atomic operations:
 
 | Phase | Name | What Happens |
 |-------|------|-------------|
 | 1 | **Commit** | The sender creates an immutable, content-addressed commitment of the entity |
-| 2 | **Entangle** | A minimal proof (the "entanglement key") is transmitted to the receiver |
+| 2 | **Lattice** | A minimal proof (the "lattice key") is transmitted to the receiver |
 | 3 | **Materialize** | The receiver deterministically reconstructs the entity from distributed sources using the proof |
 
 The entity is never serialized and shipped as a monolithic payload. It is **committed, proved, and reconstructed**.

@@ -1,10 +1,10 @@
-# ETP Architecture (v2 — Option C Security)
+# LTP Architecture (v2 — Option C Security)
 
 ## System Overview
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
-│                     ENTANGLEMENT TRANSFER PROTOCOL v2                    │
+│                     LATTICE TRANSFER PROTOCOL v2                    │
 │                                                                         │
 │  ┌──────────┐  ~1300 bytes     ┌──────────┐                            │
 │  │  SENDER  │ ════════════════ │ RECEIVER │                            │
@@ -87,11 +87,11 @@ The Entity Engine is the sender-side component that prepares entities for commit
 └─────────────────────────────────────────────────┘
 ```
 
-### 2. Entanglement Key Generator (v2 — Minimal Sealed Key)
+### 2. Lattice Key Generator (v2 — Minimal Sealed Key)
 
 ```
 ┌──────────────────────────────────────────────────────┐
-│        ENTANGLEMENT KEY GENERATOR (Option C)           │
+│        LATTICE KEY GENERATOR (Option C)           │
 │                                                        │
 │  Inputs:                                               │
 │  ├── entity_id (from commitment)                       │
@@ -124,7 +124,7 @@ The Entity Engine is the sender-side component that prepares entities for commit
 │  • Receivers SHOULD rotate ek/dk periodically            │
 │                                                        │
 │  Output:                                               │
-│  └── Sealed EntanglementKey (~1,300 bytes, opaque)       │
+│  └── Sealed LatticeKey (~1,300 bytes, opaque)       │
 └──────────────────────────────────────────────────────┘
 ```
 
@@ -235,7 +235,7 @@ The Entity Engine is the sender-side component that prepares entities for commit
    │     record to log           │  (Merkle root only,      │
    │     (NO shard_ids)          │   no shard_ids)          │
    │                             │                          │
-   │  7. Generate entanglement   │                          │
+   │  7. Generate latticement   │                          │
    │     key (entity_id + CEK    │                          │
    │     + ref + policy)         │                          │
    │  8. Seal key to receiver ──────────────────────────▶  │
@@ -274,7 +274,7 @@ The Entity Engine is the sender-side component that prepares entities for commit
 │  ├── One-time materialization                      │
 │  ├── Time-bounded access                           │
 │  ├── Delegatable permissions                       │
-│  └── Revocable entanglement                        │
+│  └── Revocable lattice link                        │
 │                                                    │
 │  Layer 5: SEALED ENVELOPE (ML-KEM-768)                 │
 │  ├── Entire key encapsulated via ML-KEM-768 (FIPS 203)   │
@@ -287,7 +287,7 @@ The Entity Engine is the sender-side component that prepares entities for commit
 │  ├── Per-shard nonce (shard_index)                 │
 │  ├── Nodes store ciphertext only (can't read)      │
 │  ├── Authenticated: tampering detected before use  │
-│  └── CEK exists only inside sealed entanglement key│
+│  └── CEK exists only inside sealed lattice key│
 │                                                    │
 │  Layer 3: ZERO-KNOWLEDGE (Optional)                │
 │  ├── ZK-proofs on commitment records               │
@@ -310,7 +310,7 @@ The Entity Engine is the sender-side component that prepares entities for commit
 ### Attack Surface Closure (v1 → v2)
 
 ```
-  LEAK 1: Entanglement Key (in transit)
+  LEAK 1: Lattice Key (in transit)
   v1: ✗ Plaintext JSON with shard_ids, encoding params, sender_id
   v2: ✓ Sealed envelope — opaque ciphertext, zero metadata
 
@@ -333,7 +333,7 @@ The Entity Engine is the sender-side component that prepares entities for commit
 | Shards → Encrypted Shards | O(entity) + O(n×32) tags | Sender (local) | None |
 | Encrypted Shards → Nodes | O(entity × replication) | Sender → Network | Amortized, async |
 | Commitment Record | O(1) ~512B | Sender → Log | Minimal |
-| **Entanglement Key** | **O(1) ~1,300B sealed** | **Sender → Receiver** | **Near zero** |
+| **Lattice Key** | **O(1) ~1,300B sealed** | **Sender → Receiver** | **Near zero** |
 | Encrypted Shards → Receiver | O(entity) | Network → Receiver | Local fetches |
 | Decrypt + Decode | O(entity) | Receiver (local) | None |
 
