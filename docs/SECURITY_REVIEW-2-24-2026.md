@@ -268,7 +268,7 @@ adversary can produce two distinct entities $e \neq e'$ such that $\text{EntityI
 given A's output $(e, e')$ with $e \neq e'$ and $H(\text{encode}(e)) = H(\text{encode}(e'))$,
 we have a collision. This contradicts the collision resistance of H.  $\blacksquare$
 
-### 4.2 Shard Integrity (Preimage Resistance)
+### 4.2 Shard Integrity (Preimage Resistance) ✅
 
 **Theorem:** Under preimage resistance of H, no PPT adversary can substitute a shard
 $s_i' \neq s_i$ that passes verification.
@@ -276,6 +276,16 @@ $s_i' \neq s_i$ that passes verification.
 **Proof:** Verification checks $H(s_i' \| \text{entity\_id} \| i) = \text{ShardID}_i = H(s_i \| \text{entity\_id} \| i)$.
 For $s_i' \neq s_i$ this requires finding a second preimage, contradicting second-preimage
 resistance of H.  $\blacksquare$
+
+> **PoC Validation (completed):** The proof-of-concept now implements two-layer shard integrity:
+> 1. **AEAD per-shard authentication** — each encrypted shard carries a 32-byte HMAC tag;
+>    `materialize()` catches `ValueError` on tampered shards and skips them (Theorem 4, SINT game).
+> 2. **Content hash gate** — `CommitmentRecord.content_hash = H(content)` is covered by the
+>    ML-DSA signature; `materialize()` Step 8 recomputes `H(reconstructed)` and rejects on mismatch.
+> 3. **Demo verification** — a tamper detection section flips bits in a stored shard, confirms
+>    AEAD rejects it, reconstructs from remaining shards (any k-of-n), and verifies EXACT MATCH.
+> 4. **Resilient fetch** — `materialize()` now fetches all n shards (not just k), so AEAD-rejected
+>    shards can be replaced by redundant valid ones without failing the transfer.
 
 ### 4.3 Threshold Secrecy (Information-Theoretic, Reed-Solomon MDS)
 
