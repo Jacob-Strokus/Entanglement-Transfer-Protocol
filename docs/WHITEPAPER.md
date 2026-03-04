@@ -73,6 +73,16 @@ committed with different declared shapes produces different entities.
 | Parameterized media type | `type/subtype; param=value` per [RFC 2045 §5](https://datatracker.ietf.org/doc/html/rfc2045#section-5) | `text/plain; charset=utf-8`, `application/json; schema=urn:ltp:medical-record:v1` |
 | LTP extension type | `x-ltp/subtype` (reserved namespace for protocol-internal types) | `x-ltp/state-snapshot`, `x-ltp/credential-bundle` |
 
+**Extension Type Registry.** The `x-ltp/` namespace is reserved for LTP-defined extension
+types. To prevent independently developed implementations from assigning conflicting meanings
+to the same subtype, new `x-ltp/` values MUST be registered before use. Registration is
+lightweight: submit the subtype name, a one-paragraph semantic description, and a contact
+to the LTP Extension Registry document maintained alongside this specification (see
+`docs/extension-registry.md` in the reference repository). Unregistered subtypes SHOULD
+be prefixed with a reverse-domain identifier (e.g., `x-ltp/com.example.my-type`) to avoid
+collisions during local experimentation. IANA media types (`type/subtype`) do not require
+LTP registration — they are governed by RFC 6838.
+
 **Canonicalization rules:**
 1. The `type` and `subtype` components are lowercased before hashing (per RFC 6838 §4.2)
 2. Parameters are sorted lexicographically by parameter name
@@ -98,7 +108,10 @@ EntityID = H(content || shape || timestamp || sender_pubkey)
 ```
 
 Where:
-- `H` is a collision-resistant hash function (e.g., BLAKE3 or Poseidon for ZK-friendliness)
+- `H` is a collision-resistant hash function. The **default is BLAKE3-256**; BLAKE2b-256 is
+  an interoperable alternative with identical output length. ZK transfer mode (§3.2) requires
+  Poseidon in place of BLAKE3 for circuit-friendliness. Hash outputs are encoded as lowercase
+  hexadecimal strings prefixed with the algorithm name: `blake3:<hex>` or `blake2b:<hex>`.
 - `||` denotes concatenation
 - `timestamp` is the commitment time (logical clock, not wall clock)
 - `sender_pubkey` is the sender's public key, binding identity to origin
@@ -342,6 +355,12 @@ The receiver uses the lattice key to **reconstruct** the entity from the commitm
    — AEAD authentication tag is verified BEFORE decryption (tamper detection)
 9. ErasureDecode(decrypted_shards, k) → entity content
 10. Verify: H(entity_content || shape || timestamp || sender_pubkey) == entity_id
+    — *End-to-end content integrity check.* This is distinct from the Merkle root verification
+    in steps 3–4, which confirms commitment record integrity. This step independently verifies
+    that the reconstructed content matches the EntityID, providing a second line of defense:
+    an adversary who substitutes a valid-but-different commitment record (one whose signature
+    and Merkle root internally check out, but which references a different entity) cannot
+    pass this check, because the reconstructed content will hash to a different EntityID.
 11. Entity materialized. Transfer complete.
 ```
 
@@ -392,7 +411,7 @@ whereas direct transfer costs O(entity × receiver_count).
 | Sender denies transfer occurred | Commitment record is on immutable append-only log with sender's signature |
 | Receiver claims different data was sent | Entity ID is deterministic hash of content; both parties can verify |
 | Replay attack (re-use lattice key) | Access policy can enforce one-time materialization; commitment nodes track access |
-| Quantum computing threat | **Full post-quantum security**: ML-KEM-768 (FIPS 203) for key encapsulation, ML-DSA-65 (FIPS 204) for signatures, BLAKE2b/BLAKE3 for hashing (quantum-resistant), erasure coding is information-theoretic (quantum-immune). No X25519 or Ed25519 in the protocol. |
+| Quantum computing threat | **Full post-quantum security**: ML-KEM-768 (FIPS 203) for key encapsulation, ML-DSA-65 (FIPS 204) for signatures, BLAKE3-256 for hashing (quantum-resistant; BLAKE2b-256 is an alternative with identical security parameters), erasure coding is information-theoretic (quantum-immune). No X25519 or Ed25519 in the protocol. |
 
 ### 3.2 Zero-Knowledge Transfer Mode
 
@@ -566,12 +585,12 @@ Game IMM:
   3. A wins if EntityID(e) = EntityID(e').
 ```
 
-**Theorem 3 (Entity Immutability).** For any PPT adversary $\mathcal{A}$:
+**Theorem 3 (Entity Immutability).** For any PPT adversary $\mathcal{A}$ and any
+collision-resistant hash function $H$ with $n$-bit output:
 
 $$\mathsf{Adv}^{\text{IMM}}_{\mathcal{A}}(\lambda) \leq \mathsf{Adv}^{\text{CR}}_{H}(\lambda)$$
 
-where $\mathsf{Adv}^{\text{CR}}_{H}$ is the collision-resistance advantage against $H$
-(BLAKE2b-256).
+where $\mathsf{Adv}^{\text{CR}}_{H}$ is the collision-resistance advantage against $H$.
 
 *Proof.* Reduction: Given $\mathcal{A}$ that wins IMM, construct $\mathcal{B}$ that breaks
 collision resistance of $H$. $\mathcal{B}$ runs $\mathcal{A}$ and receives $(e, e')$ with
@@ -579,7 +598,10 @@ $e \neq e'$ and $H(\text{encode}(e)) = H(\text{encode}(e'))$. Since $e \neq e'$ 
 $\text{encode}(e) \neq \text{encode}(e')$ (encoding is injective), $\mathcal{B}$ outputs
 $(\text{encode}(e), \text{encode}(e'))$ as a collision for $H$. ∎
 
-**Concrete security.** For BLAKE2b-256 ($n = 256$ output bits), the birthday bound gives
+**Concrete security.** The theorem holds for any $n$-bit collision-resistant $H$. The
+canonical choice is **BLAKE3-256** ($n = 256$); BLAKE2b-256 is an equally valid alternative
+with identical output length and equivalent security parameters (both provide 128-bit
+classical / 128-bit post-quantum collision resistance). The birthday bound gives
 $\mathsf{Adv}^{\text{CR}}_{H} \leq q^2 / 2^{257}$ where $q$ is the number of hash
 evaluations. At $q = 2^{128}$ (computational limit): $\mathsf{Adv} \approx 2^{-1}$
 (infeasible in practice). Grover's algorithm reduces preimage search to $O(2^{128})$
@@ -798,7 +820,7 @@ the adversary must break at least one. The advantage is bounded by the sum. ∎
 
 **This is LTP's strongest security theorem.** It is a composite reduction that chains four
 standard cryptographic assumptions. Under NIST Level 3 security (ML-KEM-768 + ML-DSA-65
-+ BLAKE2b-256), each component provides $\geq 128$ bits of post-quantum security.
++ BLAKE3-256), each component provides $\geq 128$ bits of post-quantum security.
 
 #### 3.3.7 What Cannot Be Formally Proven
 
@@ -813,6 +835,11 @@ standard cryptographic assumptions. Under NIST Level 3 security (ML-KEM-768 + ML
 ---
 
 ## 4. Immutability Guarantees
+
+> **Informal Summary.** This section provides an intuitive explanation of LTP's immutability
+> properties. The formal security definitions and game-based proofs are in §3.3 (Theorems 1–8).
+> Readers seeking rigorous statements should consult §3.3 directly; this section restates those
+> results in prose form for accessibility.
 
 ### 4.1 Why Immutability Is Inherent
 
@@ -1561,11 +1588,18 @@ contention), $T_{LTP} \approx T_{direct}$ but with the sender free to go offline
 | Receiver proximity optimization | No | Partial | Partial | No | Partial | **Yes** |
 | Deterministic shard placement | No | DHT | DHT peers | Server-assigned | Server-assigned | **Consistent hash** |
 | Append-only audit log | No | No | No | No | No | **Yes** |
+| **Protocol complexity** | Low | Medium | Low | High | High | **Very High** |
+| **Production deployment maturity** | Ubiquitous | Production | Ubiquitous | Limited | Production | **Research prototype** |
+| **Single-transfer overhead** | Minimal | Low | Low | Moderate | Moderate | **High (commit + lattice + materialize round-trips)** |
 
 **Reading guide:** LTP's unique cells (only LTP has "Yes") are: O(1) sender→receiver path,
 receiver-bound capabilities, per-message PQ forward secrecy, PQ-signed append-only audit log,
 and ZK privacy mode. The encrypted storage, erasure coding, and capability-based access that
-LTP shares with Tahoe-LAFS and Storj are acknowledged as prior art — see Section 8.
+LTP shares with Tahoe-LAFS and Storj are acknowledged as prior art — see Section 8. The final
+three rows reflect dimensions where LTP is weakest: LTP's three-phase design introduces
+significant protocol complexity compared to point-to-point alternatives; it is currently a
+research prototype with no production deployment; and for single-receiver, small-payload
+transfers, the commit+lattice+materialize overhead dominates (see §6.4).
 
 ---
 
