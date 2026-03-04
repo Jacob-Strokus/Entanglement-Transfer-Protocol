@@ -483,3 +483,130 @@ once committed, the content-addressed, append-only, signature-bound record canno
 deleted, or attributed to a different sender. Reversal would require breaking collision
 resistance (computationally infeasible) or compromising the append-only log (requires
 dishonest majority).
+
+---
+
+## 8. Formal Peer Review Responses
+
+*Tracking resolution of findings from `LTP_Whitepaper_Formal_Review.md`.*
+
+### FR 4.1 — Entity Immutability (Collision Resistance) ✅
+
+**Finding:** The IMM game (Theorem 3) needs PoC validation demonstrating that the
+collision resistance reduction actually holds in the implementation.
+
+**Resolution:** Five independent validations added to the PoC demo:
+deterministic EntityID, avalanche effect, encoding injectivity, empirical collision
+search (10,000 IDs, zero collisions), and end-to-end immutability gate with ML-DSA
+signature binding. See internal §4.1 above for details.
+
+### FR 4.2 — Commitment Log Trust Model ✅
+
+**Finding:** The append-only commitment log lacks a formal trust model. Security proofs
+assume an idealized log; the paper should specify exact assumptions, fork detection,
+and how receivers verify they read the canonical log.
+
+**Resolution (Whitepaper §5.1.4 + PoC):**
+
+- **Whitepaper:** Added §5.1.4 "Commitment Log Trust Model" specifying:
+  - Formal trust assumptions (append-only, availability, consistency, liveness)
+  - Trust tiers (single operator → federated → decentralized)
+  - Fork detection via signed tree heads (STH), gossip protocol, inclusion proofs
+  - Compromise impact analysis and minimum viable trust requirements
+  - Recommended deployment posture
+
+- **PoC:** `CommitmentLog` class upgraded with:
+  1. **Hash-chain**: each record includes `chain_hash = H(record_bytes ‖ prev_chain_hash)`;
+     any historical modification breaks the chain at the tampered index and all subsequent entries
+  2. **Signed Tree Heads (STH)**: monotonically increasing sequence + root hash + timestamp
+     generated at each append; clients can cache and compare STHs for fork detection
+  3. **Inclusion proofs**: `get_inclusion_proof()` returns chain position + predecessor hash;
+     `verify_inclusion()` re-derives chain hash from record bytes to confirm membership
+  4. **`verify_chain_integrity()`**: walks the full chain from genesis, recomputes every
+     chain hash, returns `(True, last_idx)` on success or `(False, break_idx)` on tampering
+
+- **PoC Demo Validations:**
+  1. Chain integrity verification (full chain walk: ✓ INTACT)
+  2. Inclusion proofs for 5 committed entities (all verified)
+  3. Tamper detection: 1-bit flip in historical record → chain breaks at index 0 (correct)
+  4. STH sequence: monotonic timestamps + sequential indices (verified)
+
+### FR 4.3 — Storage Proof Weakness ✅
+
+**Finding:** The challenge-response storage proof is weaker than Filecoin's SNARKs.
+A node that re-fetches data just before an audit can pass dishonestly, defeating the
+storage proof and degrading the effective replication factor to 1.
+
+**Resolution (Whitepaper §5.2.2 + PoC):**
+
+- **Whitepaper:** §5.2.2 expanded with anti-outsourcing measures:
+  - Tight time bounds: response deadline $T < \min \text{RTT}(\text{node}, \text{peers}) - \varepsilon$
+  - Burst challenges: $b$ simultaneous nonces per shard; outsourcing requires $b$ relay
+    round-trips, each consuming the time budget
+  - Economic deterrent: stake $\geq (b \cdot c_{\text{fetch}} + \delta)$ per shard
+  - Honest limitation acknowledged: commodity-link proofs cannot fully prevent
+    co-located relay; time bounds + economics close the practical gap
+
+- **PoC:** `audit_node()` upgraded with:
+  1. **Burst parameter**: `burst=b` issues $b$ simultaneous nonces per shard
+  2. **Response timing**: `time.monotonic()` tracks per-challenge latency;
+     `avg_response_us` field reported in audit results
+  3. **Suspicious latency detection**: burst responses exceeding 1ms threshold
+     flagged (real systems: $T < \min \text{RTT} - \varepsilon$)
+  4. **Amplified failure signal**: missing shard × burst = proportionally more
+     failed challenges (2 missing shards × burst=4 = 16 missing responses)
+
+- **PoC Demo Validations:**
+  1. Baseline audit (burst=1): all nodes pass with µs-level latency
+  2. Burst audit (burst=4): anti-outsourcing challenge, all nodes pass
+  3. Degraded burst audit: partial data loss × burst = amplified detection signal
+
+### FR 4.4 — CEK Uniqueness / Nonce Safety ✅
+
+**Finding:** Nonce-as-index for AEAD requires justification that the same CEK is never
+reused across entities.
+
+**Resolution:** See internal §4.3.1 above. CEK uniqueness invariant stated in three places
+(Whitepaper §2.1.1, PoC `ShardEncryptor`, PoC `commit()` method). CSPRNG + runtime
+collision tracking provides defense-in-depth.
+
+### FR 4.5 — Availability Model / Correlated Failures ✅
+
+**Finding:** The availability calculation assumes independent node failures. Real-world
+deployments exhibit correlated failures (cloud outages, regional disasters). The
+99.9999999% figure is misleading under correlation.
+
+**Resolution (Whitepaper §5.4.1.1 + PoC):**
+
+- **Whitepaper:** Added §5.4.1.1 "Correlated Failure Model":
+  - Formal partitioning of nodes into failure domains $D_1, \ldots, D_m$
+  - Per-replica failure probability under correlated model:
+    $\Pr[\text{all replicas fail}] = \prod_j (1 - (1-p_j)^{r_j})$
+  - Worked example comparing three placement strategies:
+    - Independent (ideal): 99.9999999%
+    - Cross-region (realistic): 99.999997%
+    - Same-region (worst case): 99.58%
+  - Deployment requirement: all shard replicas must span distinct failure domains
+
+- **PoC:** `CommitmentNetwork` extended with:
+  1. **`region_failure()`** / **`restore_region()`**: simulates correlated regional outage
+     (all nodes in region evicted simultaneously)
+  2. **`check_cross_region_placement()`**: verifies shard replica pairs span distinct regions
+  3. **`availability_under_region_failure()`**: computes surviving shards if a region fails
+
+- **PoC Demo Validations:**
+  1. Cross-region placement verification: all 8 shards have cross-region replicas (✓)
+  2. Single-region failure: entity survives any one of 6 regions failing (6/6 ✓)
+  3. Live region failure: evict all nodes in a region, fetch surviving shards, confirm
+     materialization still possible (✓)
+  4. Two-region failure stress test: graceful degradation under multi-region correlated
+     failure (tested)
+
+### FR 5.2 — Shape Specification ✅
+
+**Finding:** The whitepaper references Entity "shape" but never defines its format, valid
+values, or canonicalization rules.
+
+**Resolution:** See Whitepaper §1.1.1. Shape is a canonical IANA media type
+(`type/subtype[;param=value]*`). `canonicalize_shape()` ensures case-insensitive matching
+and parameter ordering. PoC validates via regex and raises `ValueError` on invalid shapes.

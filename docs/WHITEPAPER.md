@@ -739,6 +739,66 @@ The network evolves through three stages:
 Transition between stages is governed by the genesis configuration and requires a
 supermajority ($\geq 2/3$) of existing operators to approve via signed votes.
 
+#### 5.1.4 Commitment Log Trust Model
+
+The append-only commitment log is foundational to LTP's immutability and non-repudiation
+guarantees (Theorems 1, 6, 8). The security proofs assume an idealized log that cannot be
+tampered with. In practice, this assumption requires an explicit trust model.
+
+**Formal trust assumptions.** LTP's commitment log requires:
+
+| Assumption | Formal Statement | Consequence if Violated |
+|-----------|-----------------|------------------------|
+| **Append-only integrity** | Once a record $R$ is accepted at position $i$, no operation can modify $R$ or insert a different record at position $i$. | Immutability guarantee (Theorem 1) fails — adversary can retroactively alter committed content. |
+| **Consistency** | All honest participants observe the same log state (up to bounded propagation delay $\delta$). | Non-repudiation (Theorem 6) fails — sender could present different log states to different verifiers. |
+| **Liveness** | A valid commitment record submitted by an honest sender is accepted within bounded time $\Delta$. | Availability degrades — entities cannot be committed. Does NOT affect already-committed entities. |
+
+**Trust tiers.** The strength of these assumptions depends on the log implementation:
+
+| Implementation | Append-Only | Consistency | Trust Requirement |
+|---------------|-------------|-------------|-------------------|
+| Single trusted operator | Operator honesty | Trivial (single source) | Full trust in operator |
+| CT-style multi-operator Merkle log [7] | At least 1 honest operator publishes the tree head | Gossip protocol detects forks (split-view attack) | At least 1 honest mirror + gossip |
+| BFT replicated log (PBFT/Raft) | $f < n/3$ Byzantine operators | BFT consensus | $> 2/3$ honest operators |
+| Public blockchain | Computational hardness (PoW) or economic security (PoS) | Longest-chain / finality gadget | Honest majority of stake/work |
+
+**Fork detection and resolution.** A *log fork* occurs when an operator presents different
+log states to different participants (equivocation). LTP mitigates this via:
+
+1. **Signed tree heads (STH).** Each log operator periodically signs and publishes a
+   tree head: $\text{STH}_i = \text{Sign}(sk_{\text{operator}}, H(\text{root}_i \| i \| t))$.
+   Receivers SHOULD fetch STHs from multiple operators and verify consistency.
+
+2. **Gossip protocol.** Participants exchange STHs; any inconsistency (two valid STHs at
+   the same sequence number with different roots) is cryptographic proof of operator
+   equivocation. This follows the Certificate Transparency gossip model [7].
+
+3. **Inclusion proofs.** When a receiver materializes an entity, the log provides a
+   Merkle inclusion proof that the commitment record exists in the tree committed by the
+   STH. This is $O(\log N)$ in proof size where $N$ is the number of log entries.
+
+**What happens if the log is compromised?**
+
+| Attack | Impact | Detection | Recovery |
+|--------|--------|-----------|----------|
+| Operator withholds records | New commits blocked; existing entities unaffected | Liveness timeout; failover to alternate operator | Switch to healthy operator; re-submit pending commits |
+| Operator equivocates (fork) | Different receivers see different logs | Gossip detects inconsistent STHs | Equivocation proof published; operator evicted; logs merged |
+| Operator deletes a record | Non-repudiation violated for that record | Any participant with a cached STH + inclusion proof detects deletion | Cached proofs serve as evidence; operator evicted |
+| All operators compromised | Full log integrity lost | No automated detection | Catastrophic — requires manual recovery and network re-bootstrap |
+
+**Minimum viable trust for non-repudiation:** Theorem 6 (non-repudiation) holds if at
+least one honest participant (operator, receiver, or auditor) retains a copy of the STH
+at the time the commitment was made. The commitment record's ML-DSA signature is
+self-authenticating — it can be verified against the sender's public key without trusting
+the log. The log's role is to prevent the sender from denying the *existence* of the
+commitment, not its *authenticity*.
+
+**Recommended deployment posture:** For production deployments, LTP SHOULD use a
+multi-operator CT-style Merkle log with gossip-based fork detection. This provides
+append-only integrity under the assumption that at least one operator is honest —
+a strictly weaker trust requirement than BFT consensus ($> 2/3$ honest) and achievable
+with as few as 2 independent operators.
+
 ### 5.2 Sybil Resistance
 
 A Sybil attack occurs when an adversary creates many fake identities to gain disproportionate
@@ -765,20 +825,52 @@ at scale. An attacker cannot cheaply create thousands of identities.
 #### 5.2.2 Layer 2: Storage Proofs
 
 Identity alone is insufficient — a node could register legitimately but not actually store
-data. LTP requires ongoing **proof-of-storage** via a lightweight challenge-response protocol:
+data. LTP requires ongoing **proof-of-storage** via a challenge-response protocol with
+anti-outsourcing measures:
 
 ```
-Auditor → Node:  Challenge(entity_id, shard_index, nonce)
-Node → Auditor:  H(encrypted_shard || nonce)    [within time bound T]
+Auditor → Node:  Challenge(entity_id, shard_index, nonce, deadline=now+T)
+Node → Auditor:  Proof(H(encrypted_shard || nonce), response_time)    [within T]
 ```
 
 - The auditor sends a random nonce and a specific (entity_id, shard_index) pair
-- The node must return `H(ciphertext || nonce)` within a time bound $T$
+- The node must return `H(ciphertext || nonce)` within a **strict time bound** $T$
 - Since shards are AEAD-encrypted, the node computes over **ciphertext** — no plaintext
   access is needed and no confidentiality is compromised
 - The auditor can verify the response because it knows the expected `H(ciphertext || nonce)`
   (it can compute this from the data it observed during the commit phase, or by fetching
   the shard from a different replica)
+
+**Anti-outsourcing measures.** The primary weakness of challenge-response storage proofs is
+that a node can outsource storage and re-fetch data when challenged. LTP employs three
+layered mitigations:
+
+1. **Tight time bound** $T$**.** The challenge window $T$ MUST be set below the network
+   round-trip time to the nearest other replica. Specifically:
+   $$T < \min_{j \neq i} \text{RTT}(\text{node}_i, \text{replica}_j) - \epsilon$$
+   where $\epsilon$ accounts for hash computation time. If $T = 50\text{ms}$ and the
+   nearest replica is 100ms away, the node cannot re-fetch in time. The auditor records
+   response latency; consistently near-deadline responses trigger escalated auditing.
+
+2. **Burst challenges.** Instead of one challenge per audit, the auditor issues $b$
+   challenges for **random** (entity_id, shard_index) pairs simultaneously. The node must
+   respond to all $b$ within the same window $T$. A node that stores legitimately performs
+   $b$ local disk reads (~1ms each for SSD). A node that outsources must perform $b$
+   network fetches — the bandwidth and latency quickly exceed $T$.
+   $$\text{Outsourcing cost} = b \times \text{RTT}_{\text{fetch}} + b \times \text{shard\_size} / \text{bandwidth}$$
+
+3. **Economic deterrent.** Audit failure triggers bond slashing. The bond MUST be set such
+   that the expected penalty from random audits exceeds the cost savings from outsourcing:
+   $$\text{bond\_slash} \times P(\text{caught}) > \text{storage\_cost\_saved} \times \text{period}$$
+   This makes outsourcing economically irrational even if individual challenges can
+   sometimes be passed dishonestly.
+
+**Honest limitation.** These measures raise the bar significantly but do NOT provide
+cryptographic proof-of-storage. A sufficiently resourced adversary with a co-located
+low-latency replica network could still outsource. For deployments requiring cryptographic
+storage guarantees, LTP recommends augmenting with proof-of-replication (PoRep) at the cost
+of SNARK overhead. For most deployments, time-bounded burst challenges with economic bonds
+provide a practical security level.
 
 **Why this is simpler than Filecoin's Proof-of-Replication:**
 
@@ -791,10 +883,9 @@ nodes from generating data on-the-fly or outsourcing storage. These require SNAR
    about physical uniqueness — if a node can serve the correct ciphertext, that's sufficient.
 
 2. **No proof-of-spacetime needed.** Filecoin must prove *continuous* storage over time via
-   periodic SNARK proofs. LTP uses periodic random challenges — simpler but weaker. A node
-   that re-fetches data just before an audit passes the challenge but doesn't actually store
-   persistently. This is an accepted tradeoff: the time-bounded challenge ($T$) limits how
-   far away re-fetch storage can be, and economic bonds make the penalty for audit failure
+   periodic SNARK proofs. LTP uses periodic random challenges with burst probing — simpler
+   but weaker. The time-bounded burst challenge ($b$ challenges within $T$) limits how far
+   away re-fetch storage can be, and economic bonds make the penalty for audit failure
    outweigh the savings from shirking.
 
 3. **Ciphertext is randomly verifiable.** Since encrypted shards are deterministic (same CEK +
@@ -906,6 +997,68 @@ $$P(\text{entity available}) = \sum_{j=4}^{8} \binom{8}{j} (0.999)^j (0.001)^{8-
 Even with 10% individual node failure rate, the combination of erasure coding ($k$-of-$n$)
 and replication ($r$ copies) produces >99.9999999% availability. This is the power of
 compounding two orthogonal redundancy mechanisms.
+
+**Important caveat: independence assumption.** The formula above assumes node failures are
+independent events. In real-world deployments, failures are highly correlated: cloud provider
+outages, network partitions, and regional disasters affect multiple nodes simultaneously.
+The worked example above is technically correct under independence but potentially misleading.
+See §5.4.1.1 for a correlated failure model that provides realistic availability estimates.
+
+#### 5.4.1.1 Correlated Failure Model
+
+To model realistic failures, we partition nodes into $R$ **failure domains** (typically
+geographic regions or administrative domains). Nodes within the same domain experience
+correlated failures: when a domain-level event occurs (cloud outage, network partition),
+all nodes in that domain fail simultaneously.
+
+Let:
+- $R$ = number of failure domains
+- $p_d$ = probability of a domain-level failure (e.g., regional cloud outage)
+- $p_n$ = probability of an independent node failure (within a healthy domain)
+- Each shard index has $r$ replicas, distributed across at least $\min(r, R)$ domains
+
+A shard index $i$ with replicas in domains $D_1, D_2, \ldots, D_r$ is unavailable when
+all replicas are down. Under the correlated model, replica $j$ in domain $D_j$ fails if:
+- The domain fails (probability $p_d$), OR
+- The individual node fails (probability $p_n$), independently
+
+The combined per-replica failure probability is:
+$$p_{\text{replica}} = p_d + (1 - p_d) \cdot p_n = p_d + p_n - p_d \cdot p_n$$
+
+If replicas are in **independent** domains:
+$$P(\text{shard}_i \text{ unavailable}) = \prod_{j=1}^{r} p_{\text{replica},j}$$
+
+If replicas are in the **same** domain (worst case):
+$$P(\text{shard}_i \text{ unavailable}) = p_d + (1 - p_d) \cdot p_n^r$$
+
+**Worked example** ($n = 8, k = 4, r = 3$ replicas across $R = 3$ independent regions,
+$p_d = 0.01$ regional outage, $p_n = 0.05$ individual node failure):
+
+With cross-region distribution:
+$$p_{\text{replica}} = 0.01 + 0.05 - 0.01 \times 0.05 = 0.0595$$
+$$P(\text{shard}_i \text{ unavailable}) = 0.0595^3 \approx 2.1 \times 10^{-4}$$
+$$P(\text{shard}_i \text{ available}) \approx 0.99979$$
+
+With same-region colocation (anti-pattern):
+$$P(\text{shard}_i \text{ unavailable}) = 0.01 + 0.99 \times 0.05^3 \approx 0.01012$$
+$$P(\text{shard}_i \text{ available}) \approx 0.98988$$
+
+| Placement | Per-shard availability | Entity availability ($k$=4 of $n$=8) |
+|-----------|----------------------|--------------------------------------|
+| Independent assumption ($p=0.1$) | 99.9% | 99.9999999% |
+| Cross-region (realistic) | 99.98% | 99.999997% |
+| Same-region (anti-pattern) | 98.99% | 99.58% |
+
+The difference is stark: same-region colocation drops entity availability from "nine nines"
+to barely two nines. This is why the genesis configuration requires `minimum_regions ≥ 3`
+and the placement algorithm MUST distribute replicas across independent failure domains.
+
+**Deployment requirement:** The shard placement algorithm (§2.1.2) MUST satisfy the
+following constraint:
+$$\forall i : |\{\text{domain}(\text{replica}_j) : j \in \text{replicas}(i)\}| \geq \min(r, R)$$
+
+That is, replicas of the same shard index MUST be placed in as many distinct failure
+domains as possible. The PoC demonstrates this via region-aware consistent hashing.
 
 **Erasure coding guarantee.** The availability model assumes ANY $k$ shards are sufficient
 for reconstruction — not just the first $k$ "data" shards. The reference implementation
