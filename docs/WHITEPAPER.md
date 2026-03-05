@@ -597,7 +597,7 @@ participants observe a consistent log state. This is an idealization. In practic
 commitment log is implemented by one of the trust tiers described in §5.1.4 — ranging from
 a single trusted operator (full trust) to a CT-style multi-operator Merkle log (trust in at
 least one honest mirror) to a BFT replicated log ($> 2/3$ honest operators). The security
-guarantees of Theorems 1, 6, and 8 hold only to the extent that the chosen log implementation
+guarantees of Theorems 3, 6, and 8 hold only to the extent that the chosen log implementation
 satisfies this assumption. See §5.1.4 for the conditions under which each implementation
 tier meets it, and for the consequences if it is violated.
 
