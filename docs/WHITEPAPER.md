@@ -1932,53 +1932,12 @@ Two distributed systems synchronize state by exchanging lattice keys. Each syste
 the other's state from the commitment network. This is faster than traditional replication because
 shards are fetched locally, and only the delta (new entity) needs materialization.
 
-### 9.5 High-Latency Link Optimization (Illustrative Thought Experiment)
+### 9.5 High-Latency Link Optimization
 
-*This section is a thought experiment illustrating two specific LTP properties —
-sender-independence and geographic optimization — rather than a practical deployment scenario.
-The infrastructure assumptions (Mars-local commitment nodes, inter-planetary shard
-pre-replication) are deployment choices, not protocol features.*
-
-**Scenario.** An Earth sender commits a 1 GB entity destined for multiple Mars-side receivers.
-Earth-Mars light delay is 20 minutes one-way; effective Earth-Mars bandwidth is 1 Mbps
-(a realistic deep-space link capacity). Mars-local bandwidth between receivers and Mars-local
-commitment nodes is 1 Gbps.
-
-**Direct transfer (without LTP) for $N$ receivers:**
-$$T_{\text{direct}} = 20\text{ min} + \frac{1\text{ GB}}{1\text{ Mbps}} \approx 20\text{ min} + 2.2\text{ hr per receiver}$$
-Each receiver independently pulls the full payload from Earth. Total Earth upload: $N \times 1\text{ GB}$.
-
-**LTP (with Mars-local commitment nodes):**
-- *Commit phase (once, asynchronous):* Sender distributes shards to Mars nodes. At 1 Mbps
-  and $r = 3$: $3\text{ GB} / 1\text{ Mbps} \approx 6.7\text{ hours}$ of Earth upload,
-  paid once regardless of $N$.
-- *Lattice phase (per receiver):* ~1,300-byte sealed key transmitted in $< 1\text{ s}$ +
-  20-minute light delay.
-- *Materialize phase (per receiver):* $1\text{ GB} / 1\text{ Gbps} = 8\text{ seconds}$
-  from Mars-local nodes.
-$$T_{\text{LTP per receiver}} \approx 20\text{ min (light delay)} + 8\text{ sec (local fetch)}$$
-
-**What this illustrates:**
-
-1. **Sender-independence:** After the commit phase completes, the Earth sender goes offline.
-   Materialization is driven entirely by receiver ↔ Mars-local-node bandwidth. The sender's
-   availability is decoupled from any specific transfer.
-
-2. **Geographic optimization:** Each receiver's materialization time is dominated by
-   Mars-local latency (8 seconds), not Earth-Mars latency (2.2 hours per receiver for
-   direct transfer). LTP relocates the bandwidth-intensive step from a high-latency
-   intercontinental link to a low-latency local one.
-
-**Break-even on bandwidth:** LTP uses $D(r + N)$ total system bytes versus direct's $DN$.
-LTP's extra commit cost is $D \times r$. At $r = 3$: break-even is $N > r = 3$ receivers —
-beyond 3 Mars-side receivers, LTP's total Earth upload ($3\text{ GB}$ once) is less than
-direct's ($N \times 1\text{ GB}$). At $N = 10$: LTP saves $7\text{ GB}$ of Earth upload.
-
-**What this does NOT claim.** LTP does not solve the physics of light delay — initial shard
-replication to Mars still traverses the 20-minute link. The advantage requires pre-populated
-Mars-local commitment nodes, which is an infrastructure deployment decision, not a protocol
-guarantee. The scenario is meaningful only when the commit cost is amortized across a
-sufficiently large receiver population (break-even: $N > r$).
+*Moved to [Appendix A](#appendix-a-high-latency-link-optimization-thought-experiment) to
+maintain the technical focus of the main document. The two properties it demonstrates —
+sender-independence and geographic optimization — are the same properties illustrated by
+the grounded scenarios in §§9.1–9.4.*
 
 ---
 
@@ -2037,6 +1996,57 @@ The result is a protocol where:
 
 Data doesn't move. Proof moves. Truth materializes.
 Bandwidth doesn't disappear. It redistributes to where it's cheapest.
+
+---
+
+## Appendix A: High-Latency Link Optimization (Thought Experiment) {#appendix-a-high-latency-link-optimization-thought-experiment}
+
+*This appendix is an illustrative thought experiment demonstrating two specific LTP properties —
+sender-independence and geographic optimization — in an extreme high-latency scenario. It is
+not a practical deployment proposal; the infrastructure assumptions (Mars-local commitment
+nodes, inter-planetary shard pre-replication) are deployment choices, not protocol features.
+The same properties are demonstrated by the grounded use cases in §§9.1–9.4.*
+
+**Scenario.** An Earth sender commits a 1 GB entity destined for multiple Mars-side receivers.
+Earth-Mars light delay is 20 minutes one-way; effective Earth-Mars bandwidth is 1 Mbps
+(a realistic deep-space link capacity). Mars-local bandwidth between receivers and Mars-local
+commitment nodes is 1 Gbps.
+
+**Direct transfer (without LTP) for $N$ receivers:**
+$$T_{\text{direct}} = 20\text{ min} + \frac{1\text{ GB}}{1\text{ Mbps}} \approx 20\text{ min} + 2.2\text{ hr per receiver}$$
+Each receiver independently pulls the full payload from Earth. Total Earth upload: $N \times 1\text{ GB}$.
+
+**LTP (with Mars-local commitment nodes):**
+- *Commit phase (once, asynchronous):* Sender distributes shards to Mars nodes. At 1 Mbps
+  and $r = 3$: $3\text{ GB} / 1\text{ Mbps} \approx 6.7\text{ hours}$ of Earth upload,
+  paid once regardless of $N$.
+- *Lattice phase (per receiver):* ~1,300-byte sealed key transmitted in $< 1\text{ s}$ +
+  20-minute light delay.
+- *Materialize phase (per receiver):* $1\text{ GB} / 1\text{ Gbps} = 8\text{ seconds}$
+  from Mars-local nodes.
+$$T_{\text{LTP per receiver}} \approx 20\text{ min (light delay)} + 8\text{ sec (local fetch)}$$
+
+**What this illustrates:**
+
+1. **Sender-independence:** After the commit phase completes, the Earth sender goes offline.
+   Materialization is driven entirely by receiver ↔ Mars-local-node bandwidth. The sender's
+   availability is decoupled from any specific transfer.
+
+2. **Geographic optimization:** Each receiver's materialization time is dominated by
+   Mars-local latency (8 seconds), not Earth-Mars latency (2.2 hours per receiver for
+   direct transfer). LTP relocates the bandwidth-intensive step from a high-latency
+   intercontinental link to a low-latency local one.
+
+**Break-even on bandwidth:** LTP uses $D(r + N)$ total system bytes versus direct's $DN$.
+LTP's extra commit cost is $D \times r$. At $r = 3$: break-even is $N > r = 3$ receivers —
+beyond 3 Mars-side receivers, LTP's total Earth upload ($3\text{ GB}$ once) is less than
+direct's ($N \times 1\text{ GB}$). At $N = 10$: LTP saves $7\text{ GB}$ of Earth upload.
+
+**What this does NOT claim.** LTP does not solve the physics of light delay — initial shard
+replication to Mars still traverses the 20-minute link. The advantage requires pre-populated
+Mars-local commitment nodes, which is an infrastructure deployment decision, not a protocol
+guarantee. The scenario is meaningful only when the commit cost is amortized across a
+sufficiently large receiver population (break-even: $N > r$).
 
 ---
 
