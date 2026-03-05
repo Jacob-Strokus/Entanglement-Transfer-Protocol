@@ -125,7 +125,20 @@ identical content committed by the same sender at different logical times produc
 EntityIDs. The commitment network stores a distinct set of encrypted shards for each commit
 with no mechanism to detect or coalesce redundant payloads. For fan-out workflows (one commit,
 many receivers) this is irrelevant. For workflows that repeatedly commit identical content,
-storage costs accumulate linearly with commit count. See §6.4 for the cost model implication.
+storage costs accumulate linearly with commit count. See §6.4 for a workload-specific storage
+cost analysis.
+
+**This is a deliberate design tradeoff, not an incidental consequence.** LTP's EntityID binds
+content to origin (`sender_pubkey`) and moment (`timestamp`), providing *provenance guarantees*
+that content-only hashing cannot offer: two entities that happen to share the same bytes remain
+distinguishable by who committed them and when. Systems like IPFS and Git use content-only
+hashing (`H(content)`) *precisely because* deduplication is a primary goal — a file committed
+by two different parties to a Git repository produces the same blob hash regardless of origin.
+LTP occupies the opposite point in this tradeoff space: provenance and immutability are
+first-class guarantees, and deduplication is opt-in (via ContentHash, below) with an explicit
+privacy cost. Deployments where storage efficiency outweighs provenance requirements should
+evaluate whether content-only hashing (IPFS, Git) or a hybrid approach better fits their
+workload.
 
 **Optional ContentHash.** Deployments that require storage-layer deduplication without
 breaking immutability semantics may compute:
@@ -1595,9 +1608,22 @@ contention), $T_{LTP} \approx T_{direct}$ but with the sender free to go offline
 1. Single-transfer bandwidth: $r+1$ times worse than direct
 2. Storage: the commitment network stores $D \cdot r$ bytes persistently
 3. Complexity: three-phase protocol vs. one-phase direct send
-4. Deduplication: identical content committed at different times produces distinct entities
-   and distinct shard sets — no built-in coalescing across commits (see §1.2 for the optional
-   ContentHash mechanism and its privacy tradeoff)
+4. **Deduplication:** no coalescing across commits — every commit pays the full $D \cdot r$
+   storage cost regardless of overlap with prior versions. Storage cost implications for
+   high-churn workloads:
+
+   | Workload | Storage cost (no dedup) | Mitigation |
+   |----------|------------------------|------------|
+   | **Version control** (M commits, ~D bytes each) | $M \cdot D \cdot r$ — full snapshot per commit | Delta-encode *before* committing; commit the delta as the entity, not the full snapshot |
+   | **Incremental backup** (M daily snapshots of D bytes) | $M \cdot D \cdot r$ — even if only fraction $\delta$ of content changes per run | Same: commit the changed blocks as distinct entities; reconstruct by layering at the application layer |
+   | **Collaborative editing** (P editors commit near-identical versions) | $P \cdot D \cdot r$ per round | Merge at the application layer before committing; commit the canonical merged entity only |
+   | **Fan-out** (N receivers, 1 commit) | $D \cdot r$ (once) | Favorable case — this is LTP's primary use case |
+
+   ContentHash (§1.2) provides storage-layer deduplication for *byte-identical* commits at the
+   cost of revealing content equality to log observers. For version control and backup workloads
+   the practical recommendation is to apply delta encoding or content deduplication *before*
+   the COMMIT phase — each LTP entity should represent a distinct logical unit, not an
+   intermediate edit state.
 
 ---
 
