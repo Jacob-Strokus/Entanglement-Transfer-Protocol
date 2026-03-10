@@ -11,7 +11,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
-from .primitives import AEAD, MLKEM, MLDSA, H
+from .primitives import AEAD, MLKEM, MLDSA
 
 __all__ = ["KeyPair", "SealedBox"]
 
@@ -90,9 +90,6 @@ class SealedBox:
     Total overhead: 1088 + 16 + 32 = 1136 bytes over plaintext
     """
 
-    # PoC: maps (ek_fingerprint, kem_ct_hash) → shared_secret for simulation
-    _PoC_encaps_table: dict[tuple[str, str], bytes] = {}
-
     @classmethod
     def seal(cls, plaintext: bytes, receiver_ek: bytes) -> bytes:
         """
@@ -105,11 +102,6 @@ class SealedBox:
             f"Invalid ek size: {len(receiver_ek)} (expected {MLKEM.EK_SIZE})"
 
         shared_secret, kem_ct = MLKEM.encaps(receiver_ek)
-
-        # PoC: store mapping so decaps can recover shared_secret
-        ek_fingerprint = H(receiver_ek)
-        ct_hash = H(kem_ct)
-        cls._PoC_encaps_table[(ek_fingerprint, ct_hash)] = shared_secret
 
         nonce = os.urandom(16)
         ciphertext = AEAD.encrypt(shared_secret, plaintext, nonce)
@@ -132,14 +124,9 @@ class SealedBox:
         nonce = sealed_data[MLKEM.CT_SIZE:MLKEM.CT_SIZE + 16]
         aead_ct = sealed_data[MLKEM.CT_SIZE + 16:]
 
-        # PoC: look up shared_secret from encaps table
-        # Production: MLKEM.decaps(receiver_keypair.dk, kem_ct) → shared_secret
-        ek_fingerprint = H(receiver_keypair.ek)
-        ct_hash = H(kem_ct)
-        lookup_key = (ek_fingerprint, ct_hash)
-
-        shared_secret = cls._PoC_encaps_table.get(lookup_key)
-        if shared_secret is None:
+        try:
+            shared_secret = MLKEM.decaps(receiver_keypair.dk, kem_ct)
+        except ValueError:
             raise ValueError(
                 "Cannot unseal — ML-KEM decapsulation failed "
                 "(wrong decapsulation key or corrupted ciphertext)"
@@ -152,8 +139,3 @@ class SealedBox:
 
         del shared_secret
         return plaintext
-
-    @classmethod
-    def reset_poc_state(cls) -> None:
-        """Clear PoC simulation state. Call between tests for isolation."""
-        cls._PoC_encaps_table.clear()

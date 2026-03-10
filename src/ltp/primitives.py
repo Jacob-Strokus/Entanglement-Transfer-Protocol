@@ -159,6 +159,11 @@ class MLKEM:
     CT_SIZE = 1088   # Ciphertext size (bytes)
     SS_SIZE = 32     # Shared secret size (bytes)
 
+    # PoC: maps dk_fingerprint → ek (populated by keygen)
+    _PoC_dk_to_ek: dict[str, bytes] = {}
+    # PoC: maps (ek_fingerprint, ct_hash) → shared_secret (populated by encaps)
+    _PoC_encaps_table: dict[tuple[str, str], bytes] = {}
+
     @classmethod
     def keygen(cls) -> tuple[bytes, bytes]:
         """
@@ -177,6 +182,10 @@ class MLKEM:
         for i in range(0, cls.EK_SIZE, 32):
             ek_material.extend(H_bytes(seed + struct.pack('>I', i) + b"mlkem-ek"))
         ek = bytes(ek_material[:cls.EK_SIZE])
+
+        # PoC: store dk→ek binding for decapsulation lookup
+        dk_fp = H(dk[:32])
+        cls._PoC_dk_to_ek[dk_fp] = ek
 
         return ek, dk
 
@@ -204,6 +213,11 @@ class MLKEM:
             ct_material.extend(H_bytes(ek + ephemeral + struct.pack('>I', i) + b"mlkem-ct"))
         ciphertext = bytes(ct_material[:cls.CT_SIZE])
 
+        # PoC: store for decapsulation lookup
+        ek_fp = H(ek)
+        ct_hash = H(ciphertext)
+        cls._PoC_encaps_table[(ek_fp, ct_hash)] = shared_secret
+
         return shared_secret, ciphertext
 
     @classmethod
@@ -217,7 +231,27 @@ class MLKEM:
         """
         assert len(dk) == cls.DK_SIZE, f"Invalid dk size: {len(dk)} (expected {cls.DK_SIZE})"
         assert len(ciphertext) == cls.CT_SIZE, f"Invalid ct size: {len(ciphertext)} (expected {cls.CT_SIZE})"
-        raise NotImplementedError("Direct decaps() not used in PoC — see SealedBox")
+
+        # PoC: recover shared_secret via lookup tables (dk → ek → encaps table)
+        dk_fp = H(dk[:32])
+        ek = cls._PoC_dk_to_ek.get(dk_fp)
+        if ek is None:
+            raise ValueError("Cannot decapsulate — unknown decapsulation key")
+        ek_fp = H(ek)
+        ct_hash = H(ciphertext)
+        shared_secret = cls._PoC_encaps_table.get((ek_fp, ct_hash))
+        if shared_secret is None:
+            raise ValueError(
+                "Cannot decapsulate — ciphertext not found "
+                "(wrong key or corrupted ciphertext)"
+            )
+        return shared_secret
+
+    @classmethod
+    def reset_poc_state(cls) -> None:
+        """Clear PoC simulation state. Call between tests for isolation."""
+        cls._PoC_dk_to_ek.clear()
+        cls._PoC_encaps_table.clear()
 
 
 # ---------------------------------------------------------------------------

@@ -46,18 +46,19 @@ from .commitment import (
 )
 from .lattice import LatticeKey
 from .protocol import LTPProtocol
+from ..merkle_log import MerkleTree, SignedTreeHead, InclusionProof, MerkleLog
 
 
 def reset_poc_state() -> None:
     """Reset all PoC simulation state across modules.
 
     Call this between tests or when you need fresh state. Clears:
+      - MLKEM encapsulation lookup tables
       - MLDSA signature lookup tables
-      - SealedBox encapsulation lookup tables
       - ShardEncryptor issued CEK tracking set
     """
+    MLKEM.reset_poc_state()
     MLDSA.reset_poc_state()
-    SealedBox.reset_poc_state()
     ShardEncryptor.reset_poc_state()
 
 
@@ -88,6 +89,11 @@ __all__ = [
     "LatticeKey",
     # Protocol
     "LTPProtocol",
+    # Merkle log (CT-style commitment log, §5.1.4)
+    "MerkleTree",
+    "SignedTreeHead",
+    "InclusionProof",
+    "MerkleLog",
     # Utilities
     "reset_poc_state",
 ]
