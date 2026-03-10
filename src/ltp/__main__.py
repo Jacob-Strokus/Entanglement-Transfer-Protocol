@@ -642,14 +642,16 @@ def demo() -> None:
     print("└─ Done\n")
 
     print("┌─ 4.2 VALIDATION 4: Signed Tree Head sequence")
-    sth_list = network.log._tree_heads
+    sth_list = network.log.merkle_log._sths
     sth_monotonic = True
     for i in range(1, min(5, len(sth_list))):
-        if sth_list[i]["timestamp"] < sth_list[i - 1]["timestamp"]:
+        if sth_list[i].timestamp < sth_list[i - 1].timestamp:
             sth_monotonic = False
-        if sth_list[i]["sequence"] != sth_list[i - 1]["sequence"] + 1:
+        if sth_list[i].sequence != sth_list[i - 1].sequence + 1:
             sth_monotonic = False
+    sth_verified = all(sth.verify() for sth in sth_list[:5])
     print(f"  Monotonically increasing timestamps + sequential indices: {'✓' if sth_monotonic else '✗'}")
+    print(f"  ML-DSA-65 STH signatures verified: {'✓' if sth_verified else '✗'} ({min(5, len(sth_list))} checked)")
     print("└─ Done\n")
 
     # --- Storage Proof Strengthening (§5.2.2) ---

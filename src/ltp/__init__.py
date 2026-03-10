@@ -46,7 +46,6 @@ from .commitment import (
 )
 from .lattice import LatticeKey
 from .protocol import LTPProtocol
-from ..merkle_log import MerkleTree, SignedTreeHead, InclusionProof, MerkleLog
 
 
 def reset_poc_state() -> None:
@@ -97,3 +96,20 @@ __all__ = [
     # Utilities
     "reset_poc_state",
 ]
+
+
+# Lazy imports to avoid circular dependency (merkle_log → ltp.primitives → ltp)
+_MERKLE_LOG_NAMES = {"MerkleTree", "SignedTreeHead", "InclusionProof", "MerkleLog"}
+
+
+def __getattr__(name: str):
+    if name in _MERKLE_LOG_NAMES:
+        from ..merkle_log import MerkleTree, SignedTreeHead, InclusionProof, MerkleLog
+        _map = {
+            "MerkleTree": MerkleTree,
+            "SignedTreeHead": SignedTreeHead,
+            "InclusionProof": InclusionProof,
+            "MerkleLog": MerkleLog,
+        }
+        return _map[name]
+    raise AttributeError(f"module 'ltp' has no attribute {name!r}")

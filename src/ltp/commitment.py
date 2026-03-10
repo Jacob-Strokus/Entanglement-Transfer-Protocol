@@ -188,48 +188,50 @@ class CommitmentRecord:
 
 class CommitmentLog:
     """
-    Append-only commitment log with hash-chaining and signed tree heads.
+    CT-style append-only commitment log backed by a MerkleLog (§5.1.4).
 
-    Security properties (Whitepaper §5.1.4):
-      - Hash-chained: each entry references the hash of the previous entry
-      - Signed tree heads (STH): operators sign the root hash at each append
-      - Inclusion proofs: O(log N) Merkle proof that a record exists in the log
+    Wraps a MerkleLog (RFC 6962 Merkle tree + ML-DSA-65 Signed Tree Heads)
+    with entity_id-based indexing for the protocol layer.
+
+    Security properties:
+      - Append-only Merkle tree: RFC 6962 domain-separated leaves/nodes
+      - ML-DSA-65 Signed Tree Heads: operator-signed snapshots after each append
+      - O(log N) inclusion proofs: verify record membership without full log
+      - O(log N) consistency proofs: verify append-only invariant between snapshots
       - Fork detection: inconsistent STHs are cryptographic proof of equivocation
     """
 
     def __init__(self) -> None:
+        from .keypair import KeyPair
+        from ..merkle_log import MerkleLog
+        self._operator_kp = KeyPair.generate("log-operator")
+        self._merkle_log = MerkleLog(
+            self._operator_kp.vk, self._operator_kp.sk,
+        )
         self._records: dict[str, CommitmentRecord] = {}
-        self._chain: list[str] = []
-        self._chain_hashes: list[str] = []
-        self._tree_heads: list[dict] = []
+        self._chain: list[str] = []  # ordered entity_ids (used by audit)
+        self._record_indices: dict[str, int] = {}  # entity_id → leaf index
 
     def append(self, record: CommitmentRecord) -> str:
         """
-        Append a record to the hash-chained log. Returns its commitment reference.
+        Append a record to the Merkle log. Returns its commitment reference.
 
-        chain_hash = H(record_bytes || previous_chain_hash)
+        The record is serialized to canonical JSON, appended to the MerkleLog,
+        and an STH is published covering the new tree state.
         """
         if record.entity_id in self._records:
             raise ValueError(f"Entity {record.entity_id} already committed (immutable)")
 
-        prev_hash = self._chain_hashes[-1] if self._chain_hashes else ("0" * 64)
-        record.predecessor = prev_hash
+        record.predecessor = self.head_hash
 
         record_bytes = json.dumps(record.to_dict(), sort_keys=True).encode()
         record_hash = H(record_bytes)
-        chain_hash = H(record_bytes + prev_hash.encode())
+        idx = self._merkle_log.append(record_bytes)
+        self._merkle_log.publish_sth()
 
         self._records[record.entity_id] = record
         self._chain.append(record.entity_id)
-        self._chain_hashes.append(chain_hash)
-
-        sth = {
-            "sequence": len(self._chain) - 1,
-            "root_hash": chain_hash,
-            "timestamp": time.time(),
-            "record_count": len(self._chain),
-        }
-        self._tree_heads.append(sth)
+        self._record_indices[record.entity_id] = idx
 
         return record_hash
 
@@ -238,50 +240,69 @@ class CommitmentLog:
 
     def verify_chain_integrity(self) -> tuple[bool, int]:
         """
-        Verify the entire hash chain from genesis to head.
+        Verify the entire log against the Merkle tree.
+
+        Re-serializes each in-memory record and checks that its leaf hash
+        matches the tree.  Detects in-memory tampering (e.g., modified
+        content_hash after commit).
 
         Returns: (is_valid, last_valid_index)
         """
-        prev_hash = "0" * 64
+        from ..merkle_log.tree import _leaf_hash
+        if not self._chain:
+            return True, -1
         for i, entity_id in enumerate(self._chain):
             record = self._records[entity_id]
             record_bytes = json.dumps(record.to_dict(), sort_keys=True).encode()
-            expected_hash = H(record_bytes + prev_hash.encode())
-            if expected_hash != self._chain_hashes[i]:
+            expected = _leaf_hash(record_bytes)
+            stored = self._merkle_log._tree.leaf_hash(i)
+            if expected != stored:
                 return False, i
-            prev_hash = self._chain_hashes[i]
         return True, len(self._chain) - 1
 
     def get_inclusion_proof(self, entity_id: str) -> Optional[dict]:
-        """Generate an inclusion proof for a committed entity."""
+        """Generate an O(log N) Merkle inclusion proof for a committed entity."""
         if entity_id not in self._records:
             return None
-        idx = self._chain.index(entity_id)
+        idx = self._record_indices[entity_id]
+        proof = self._merkle_log.inclusion_proof(idx)
         return {
             "entity_id": entity_id,
             "position": idx,
-            "chain_hash": self._chain_hashes[idx],
-            "predecessor": self._chain_hashes[idx - 1] if idx > 0 else ("0" * 64),
-            "tree_head": self._tree_heads[idx] if idx < len(self._tree_heads) else None,
+            "inclusion_proof": proof,
+            "root_hash": proof.root_hash,
         }
 
     def verify_inclusion(self, entity_id: str, proof: dict) -> bool:
-        """Verify an inclusion proof against the current log state."""
+        """Verify an O(log N) inclusion proof against the current root."""
         record = self._records.get(entity_id)
         if record is None:
             return False
         record_bytes = json.dumps(record.to_dict(), sort_keys=True).encode()
-        expected = H(record_bytes + proof["predecessor"].encode())
-        return expected == proof["chain_hash"]
+        inc_proof = proof["inclusion_proof"]
+        return inc_proof.verify(record_bytes, proof["root_hash"])
 
     @property
     def head_hash(self) -> str:
-        """Current tree head hash (latest chain_hash)."""
-        return self._chain_hashes[-1] if self._chain_hashes else ("0" * 64)
+        """Current Merkle root hash as a hex string."""
+        sth = self._merkle_log.latest_sth
+        if sth is None:
+            return "0" * 64
+        return sth.root_hash.hex()
 
     @property
     def length(self) -> int:
-        return len(self._chain)
+        return self._merkle_log.size
+
+    @property
+    def latest_sth(self):
+        """Most recently published Signed Tree Head."""
+        return self._merkle_log.latest_sth
+
+    @property
+    def merkle_log(self):
+        """Access to the underlying MerkleLog for advanced operations."""
+        return self._merkle_log
 
 
 # ---------------------------------------------------------------------------
