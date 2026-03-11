@@ -16,9 +16,13 @@ import os
 import struct
 import time
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from .primitives import H, H_bytes, MLDSA
+
+if TYPE_CHECKING:
+    from ..merkle_log import MerkleLog
+    from ..merkle_log.sth import SignedTreeHead
 
 __all__ = [
     "AuditResult",
@@ -320,12 +324,12 @@ class CommitmentLog:
         return self._merkle_log.size
 
     @property
-    def latest_sth(self):
+    def latest_sth(self) -> Optional[SignedTreeHead]:
         """Most recently published Signed Tree Head."""
         return self._merkle_log.latest_sth
 
     @property
-    def merkle_log(self):
+    def merkle_log(self) -> MerkleLog:
         """Access to the underlying MerkleLog for advanced operations."""
         return self._merkle_log
 
