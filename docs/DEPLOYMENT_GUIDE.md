@@ -45,9 +45,9 @@ All 173 tests pass with zero external dependencies (stdlib-only PoC crypto).
 # Dockerfile
 FROM python:3.12-slim AS base
 
-# Install liboqs build dependencies (Phase 1 crypto swap)
+# Install liboqs + RocksDB build dependencies (Phase 1 crypto swap + Phase 2 storage)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential cmake ninja-build libssl-dev git \
+    build-essential cmake ninja-build libssl-dev git librocksdb-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Build and install liboqs + liboqs-python
@@ -59,7 +59,6 @@ RUN git clone --depth 1 --branch 0.15.0 https://github.com/open-quantum-safe/lib
     && rm -rf /tmp/liboqs
 
 # Python dependencies (production)
-COPY pyproject.toml .
 RUN pip install --no-cache-dir \
     liboqs-python>=0.15.0 \
     PyNaCl>=1.5.0 \
@@ -73,10 +72,14 @@ RUN pip install --no-cache-dir \
 
 # Application code
 COPY src/ /app/src/
+COPY tests/ /app/tests/
+COPY pyproject.toml /app/
 WORKDIR /app
 
+RUN pip install --no-cache-dir -e ".[dev]"
+
 ENV PYTHONPATH=/app/src
-ENV ETP_ENV=production
+ENV ETP_ENV=development
 
 # --- Service-specific images built FROM base ---
 
@@ -513,10 +516,16 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.name
-            - name: ETP_REGION
+            - name: ETP_NODE_NAME
               valueFrom:
                 fieldRef:
-                  fieldPath: metadata.labels['topology.kubernetes.io/zone']
+                  fieldPath: spec.nodeName
+            # ETP_REGION is set per-zone via Helm values or separate StatefulSets.
+            # The K8s downward API cannot select individual label keys.
+            # Option A: Use Helm --set region=us-east per zone deployment
+            # Option B: Init container reads node labels via K8s API
+            - name: ETP_REGION
+              value: "us-east"  # Override per-zone deployment
           volumeMounts:
             - name: shard-data
               mountPath: /data/shards
@@ -694,7 +703,7 @@ kubectl create secret generic etp-l2-verifier-dk \
   --namespace=etp --from-file=key=secrets/l2_verifier_dk.enc
 ```
 
-### 5.1 Option B: Software Signing + KMS Envelope Encryption
+### 5.2 Option B: Software Signing + KMS Envelope Encryption
 
 For environments where you want to avoid direct KMS API calls on the signing hot path:
 
@@ -771,10 +780,10 @@ scrape_configs:
       - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
         action: keep
         regex: true
-      - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_port]
+      - source_labels: [__address__, __meta_kubernetes_pod_annotation_prometheus_io_port]
         action: replace
         target_label: __address__
-        regex: (.+)
+        regex: ([^:]+)(?::\d+)?;(\d+)
         replacement: ${1}:${2}
 ```
 
@@ -873,7 +882,7 @@ groups:
 | `ETP_PROTOCOL_SERVICE` | api, anchor | gRPC address of protocol service |
 | `ETP_SHARD_NODES` | protocol | Comma-separated shard node gRPC addresses |
 | `ETP_SIGNING_KEY_PATH` | log | Path to operator ML-DSA signing key |
-| `ETP_ROCKSDB_PATH` | log, shard-nodes | Path to RocksDB data directory |
+| `ETP_ROCKSDB_PATH` | log | Path to RocksDB data directory |
 | `ETP_NODE_ID` | shard-node | Unique node identifier |
 | `ETP_REGION` | shard-node | Geographic region for placement |
 | `ETP_L1_RPC` | anchor | L1 chain RPC endpoint |

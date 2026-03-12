@@ -26,6 +26,11 @@ htmlcov/
 *.swo
 *~
 
+# Secrets and environment
+secrets/
+.env
+.env.*
+
 # OS
 .DS_Store
 Thumbs.db

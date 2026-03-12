@@ -209,7 +209,7 @@ The comment at line 253 says "fetch all n shards so AEAD can reject bad ones" bu
 | # | Area | Severity | Effort | Status |
 |---|------|----------|--------|--------|
 | 1 | Global mutable PoC state | Medium | Low | **DONE** — LRU-bounded `OrderedDict` tables (10K cap) |
-| 2 | `assert` for input validation | High | Low | **DONE** — replaced with `ValueError` in primitives.py, keypair.py |
+| 2 | `assert` for input validation | High | Low | **DONE** — replaced with `ValueError` in primitives.py, keypair.py, erasure.py |
 | 3 | Sender key registry coupling | Medium | Medium | **DONE** — extracted `KeyRegistry` class, shared across instances |
 | 4 | Demo file too long | Low | Medium | **DONE** — refactored into 10 focused functions |
 | 5 | No `pyproject.toml` | Medium | Low | **DONE** |

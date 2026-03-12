@@ -89,8 +89,10 @@ class ErasureCoder:
 
         Returns: list of n shard bytes objects.
         """
-        assert n > k > 0, "Need n > k > 0"
-        assert n <= 256, "GF(256) supports at most 256 evaluation points"
+        if not (n > k > 0):
+            raise ValueError("Need n > k > 0")
+        if n > 256:
+            raise ValueError("GF(256) supports at most 256 evaluation points")
         cls._init_gf()
 
         length_prefix = struct.pack('>Q', len(data))
@@ -166,7 +168,8 @@ class ErasureCoder:
         Input: {shard_index: shard_data} — at least k entries, any indices.
         Returns: original data bytes.
         """
-        assert len(shards) >= k, f"Need at least {k} shards, got {len(shards)}"
+        if len(shards) < k:
+            raise ValueError(f"Need at least {k} shards, got {len(shards)}")
         cls._init_gf()
 
         indices = sorted(shards.keys())[:k]
