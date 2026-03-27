@@ -54,87 +54,99 @@ ML-DSA-65 · BLAKE3 · Certificate Transparency · Reed-Solomon coding
 
 ---
 
+**Preliminary Sections**
+
 - [Abstract](#abstract)
 - [Note on Terminology](#note-on-terminology)
+
+---
+
+**Clauses**
+
 - [1. The Ontology of Data Transfer](#1-the-ontology-of-data-transfer)
-  - [1.1 What Is an "Entity"?](#11-what-is-an-entity)
-    - [1.1.1 Shape Specification](#111-shape-specification)
-  - [1.2 The Entity Identity Function](#12-the-entity-identity-function)
+    - [1.1 What Is an "Entity"?](#11-what-is-an-entity)
+        - [1.1.1 Shape Specification](#111-shape-specification)
+    - [1.2 The Entity Identity Function](#12-the-entity-identity-function)
 - [2. The Three Phases of Transfer](#2-the-three-phases-of-transfer)
-  - [Phase 1: COMMIT](#phase-1-commit)
-    - [2.1.1 Deterministic Sharding](#211-deterministic-sharding)
-    - [2.1.2 Distributed Shard Placement](#212-distributed-shard-placement)
-    - [2.1.3 The Commitment Record](#213-the-commitment-record)
-  - [Phase 2: LATTICE](#phase-2-lattice)
-    - [2.2.1 The Lattice Key](#221-the-lattice-key)
-    - [2.2.2 Key Properties of the Lattice Key](#222-key-properties-of-the-lattice-key)
-  - [Phase 3: MATERIALIZE](#phase-3-materialize)
-    - [2.3.1 Reconstruction Process](#231-reconstruction-process)
-    - [2.3.2 Why This Is Fast](#232-why-this-is-fast)
+    - [2.1 Phase 1: COMMIT](#phase-1-commit)
+        - [2.1.1 Deterministic Sharding](#211-deterministic-sharding)
+        - [2.1.2 Distributed Shard Placement](#212-distributed-shard-placement)
+        - [2.1.3 The Commitment Record](#213-the-commitment-record)
+    - [2.2 Phase 2: LATTICE](#phase-2-lattice)
+        - [2.2.1 The Lattice Key](#221-the-lattice-key)
+        - [2.2.2 Key Properties of the Lattice Key](#222-key-properties-of-the-lattice-key)
+    - [2.3 Phase 3: MATERIALIZE](#phase-3-materialize)
+        - [2.3.1 Reconstruction Process](#231-reconstruction-process)
+        - [2.3.2 Why This Is Fast](#232-why-this-is-fast)
 - [3. Security Model](#3-security-model)
-  - [3.1 Threat Analysis](#31-threat-analysis)
-  - [3.2 Zero-Knowledge Transfer Mode](#32-zero-knowledge-transfer-mode)
-    - [3.2.1 Modified Commitment Record](#321-modified-commitment-record)
-    - [3.2.2 ZK Proof Specification](#322-zk-proof-specification)
-    - [3.2.3 Security Properties](#323-security-properties)
-    - [3.2.4 Limitations and Honest Assessment](#324-limitations-and-honest-assessment)
-  - [3.3 Formal Security Definitions](#33-formal-security-definitions)
-    - [3.3.1 Entity Immutability (Collision Resistance)](#331-entity-immutability-collision-resistance)
-    - [3.3.2 Shard Integrity (Second-Preimage Resistance)](#332-shard-integrity-second-preimage-resistance)
-    - [3.3.3 Transfer Confidentiality (IND-CPA)](#333-transfer-confidentiality-ind-cpa)
-    - [3.3.4 Commitment Non-Repudiation (EUF-CMA)](#334-commitment-non-repudiation-euf-cma)
-    - [3.3.5 Threshold Secrecy (Information-Theoretic)](#335-threshold-secrecy-information-theoretic)
-    - [3.3.6 Transfer Immutability (Composite Game)](#336-transfer-immutability-composite-game)
-    - [3.3.7 What Cannot Be Formally Proven](#337-what-cannot-be-formally-proven)
+    - [3.1 Threat Analysis](#31-threat-analysis)
+    - [3.2 Zero-Knowledge Transfer Mode](#32-zero-knowledge-transfer-mode)
+        - [3.2.1 Modified Commitment Record](#321-modified-commitment-record)
+        - [3.2.2 ZK Proof Specification](#322-zk-proof-specification)
+        - [3.2.3 Security Properties](#323-security-properties)
+        - [3.2.4 Limitations and Honest Assessment](#324-limitations-and-honest-assessment)
+    - [3.3 Formal Security Definitions](#33-formal-security-definitions)
+        - [3.3.1 Entity Immutability (Collision Resistance)](#331-entity-immutability-collision-resistance)
+        - [3.3.2 Shard Integrity (Second-Preimage Resistance)](#332-shard-integrity-second-preimage-resistance)
+        - [3.3.3 Transfer Confidentiality (IND-CPA)](#333-transfer-confidentiality-ind-cpa)
+        - [3.3.4 Commitment Non-Repudiation (EUF-CMA)](#334-commitment-non-repudiation-euf-cma)
+        - [3.3.5 Threshold Secrecy (Information-Theoretic)](#335-threshold-secrecy-information-theoretic)
+        - [3.3.6 Transfer Immutability (Composite Game)](#336-transfer-immutability-composite-game)
+        - [3.3.7 What Cannot Be Formally Proven](#337-what-cannot-be-formally-proven)
 - [4. Immutability Guarantees](#4-immutability-guarantees)
-  - [4.1 Why Immutability Is Inherent](#41-why-immutability-is-inherent)
-  - [4.2 Versioning vs. Mutation](#42-versioning-vs-mutation)
-  - [4.3 Immutability ≠ Availability](#43-immutability--availability)
+    - [4.1 Why Immutability Is Inherent](#41-why-immutability-is-inherent)
+    - [4.2 Versioning vs. Mutation](#42-versioning-vs-mutation)
+    - [4.3 Immutability ≠ Availability](#43-immutability--availability)
 - [5. Commitment Network](#5-commitment-network)
-  - [5.1 Bootstrap: How the Network Starts](#51-bootstrap-how-the-network-starts)
-    - [5.1.1 Genesis Configuration](#511-genesis-configuration)
-    - [5.1.2 Why Permissioned Genesis?](#512-why-permissioned-genesis)
-    - [5.1.3 Progressive Decentralization](#513-progressive-decentralization)
-    - [5.1.4 Commitment Log Trust Model](#514-commitment-log-trust-model)
-      - [5.1.4.1 Minimum Conformance Requirements (CT-Style Merkle Log)](#5141-minimum-conformance-requirements-ct-style-merkle-log)
-      - [5.1.4.2 Fork Detection and Consistency Verification](#5142-fork-detection-and-consistency-verification)
-  - [5.2 Sybil Resistance](#52-sybil-resistance)
-    - [5.2.1 Layer 1: Identity Verification](#521-layer-1-identity-verification)
-    - [5.2.2 Layer 2: Storage Proofs](#522-layer-2-storage-proofs)
-    - [5.2.3 Audit Protocol](#523-audit-protocol)
-  - [5.3 Collusion Resistance](#53-collusion-resistance)
-    - [5.3.1 Pre-Option-C (Broken)](#531-pre-option-c-broken)
-    - [5.3.2 Post-Option-C (Mitigated)](#532-post-option-c-mitigated)
-  - [5.4 Data Availability](#54-data-availability)
-    - [5.4.1 Availability Model](#541-availability-model)
-      - [5.4.1.1 Correlated Failure Model](#5411-correlated-failure-model)
-    - [5.4.2 Failure Modes and Repair](#542-failure-modes-and-repair)
-    - [5.4.3 The CAP Theorem and LTP](#543-the-cap-theorem-and-ltp)
-    - [5.4.4 Availability vs. Permanence](#544-availability-vs-permanence)
-  - [5.5 Network Economics (Interface, Not Implementation)](#55-network-economics-interface-not-implementation)
+    - [5.1 Bootstrap: How the Network Starts](#51-bootstrap-how-the-network-starts)
+        - [5.1.1 Genesis Configuration](#511-genesis-configuration)
+        - [5.1.2 Why Permissioned Genesis?](#512-why-permissioned-genesis)
+        - [5.1.3 Progressive Decentralization](#513-progressive-decentralization)
+        - [5.1.4 Commitment Log Trust Model](#514-commitment-log-trust-model)
+            - [5.1.4.1 Minimum Conformance Requirements (CT-Style Merkle Log)](#5141-minimum-conformance-requirements-ct-style-merkle-log)
+            - [5.1.4.2 Fork Detection and Consistency Verification](#5142-fork-detection-and-consistency-verification)
+    - [5.2 Sybil Resistance](#52-sybil-resistance)
+        - [5.2.1 Layer 1: Identity Verification](#521-layer-1-identity-verification)
+        - [5.2.2 Layer 2: Storage Proofs](#522-layer-2-storage-proofs)
+        - [5.2.3 Audit Protocol](#523-audit-protocol)
+    - [5.3 Collusion Resistance](#53-collusion-resistance)
+        - [5.3.1 Pre-Option-C (Broken)](#531-pre-option-c-broken)
+        - [5.3.2 Post-Option-C (Mitigated)](#532-post-option-c-mitigated)
+    - [5.4 Data Availability](#54-data-availability)
+        - [5.4.1 Availability Model](#541-availability-model)
+            - [5.4.1.1 Correlated Failure Model](#5411-correlated-failure-model)
+        - [5.4.2 Failure Modes and Repair](#542-failure-modes-and-repair)
+        - [5.4.3 The CAP Theorem and LTP](#543-the-cap-theorem-and-ltp)
+        - [5.4.4 Availability vs. Permanence](#544-availability-vs-permanence)
+    - [5.5 Network Economics (Interface, Not Implementation)](#55-network-economics-interface-not-implementation)
 - [6. Breaking the Constraints](#6-breaking-the-constraints)
-  - [6.1 Latency](#61-latency)
-  - [6.2 Geographic Distance](#62-geographic-distance)
-  - [6.3 Computing Power](#63-computing-power)
-  - [6.4 Formal Cost Model](#64-formal-cost-model)
+    - [6.1 Latency](#61-latency)
+    - [6.2 Geographic Distance](#62-geographic-distance)
+    - [6.3 Computing Power](#63-computing-power)
+    - [6.4 Formal Cost Model](#64-formal-cost-model)
 - [7. Comparison with Existing Approaches](#7-comparison-with-existing-approaches)
 - [8. Related Work and Prior Art](#8-related-work-and-prior-art)
-  - [8.1 Content-Addressed Storage](#81-content-addressed-storage)
-  - [8.2 Erasure-Coded Distributed Storage](#82-erasure-coded-distributed-storage)
-  - [8.3 Append-Only Commitment Logs](#83-append-only-commitment-logs)
-  - [8.4 Capability-Based Security](#84-capability-based-security)
-  - [8.5 Peer-to-Peer Content Distribution](#85-peer-to-peer-content-distribution)
-  - [8.6 Hybrid and Convergent Systems](#86-hybrid-and-convergent-systems)
-  - [8.7 What LTP Contributes](#87-what-ltp-contributes)
-  - [References](#references)
+    - [8.1 Content-Addressed Storage](#81-content-addressed-storage)
+    - [8.2 Erasure-Coded Distributed Storage](#82-erasure-coded-distributed-storage)
+    - [8.3 Append-Only Commitment Logs](#83-append-only-commitment-logs)
+    - [8.4 Capability-Based Security](#84-capability-based-security)
+    - [8.5 Peer-to-Peer Content Distribution](#85-peer-to-peer-content-distribution)
+    - [8.6 Hybrid and Convergent Systems](#86-hybrid-and-convergent-systems)
+    - [8.7 What LTP Contributes](#87-what-ltp-contributes)
+    - [References](#references)
 - [9. Use Cases](#9-use-cases)
-  - [9.1 Large File Fan-Out](#91-large-file-fan-out)
-  - [9.2 Immutable Audit Trail](#92-immutable-audit-trail)
-  - [9.3 Secure Messaging](#93-secure-messaging)
-  - [9.4 State Synchronization](#94-state-synchronization)
-  - [9.5 High-Latency Link Optimization](#95-high-latency-link-optimization)
+    - [9.1 Large File Fan-Out](#91-large-file-fan-out)
+    - [9.2 Immutable Audit Trail](#92-immutable-audit-trail)
+    - [9.3 Secure Messaging](#93-secure-messaging)
+    - [9.4 State Synchronization](#94-state-synchronization)
+    - [9.5 High-Latency Link Optimization](#95-high-latency-link-optimization)
 - [10. Open Questions](#10-open-questions)
 - [11. Conclusion](#11-conclusion)
+
+---
+
+**Appendices**
+
 - [Appendix A: High-Latency Link Optimization (Thought Experiment)](#appendix-a-high-latency-link-optimization-thought-experiment)
 
 ---
@@ -1264,7 +1276,7 @@ the trust requirement:
 | BFT replicated log (PBFT/Raft) | $f < n/3$ Byzantine operators | BFT consensus | $> 2/3$ honest operators | Adversarial multi-party environments |
 | Public blockchain | Computational hardness (PoW) or economic security (PoS) | Longest-chain / finality gadget | Honest majority of stake/work | Fully decentralized / permissionless |
 
-#### 5.1.4.1 Minimum Conformance Requirements (CT-Style Merkle Log)
+##### 5.1.4.1 Minimum Conformance Requirements (CT-Style Merkle Log)
 
 An implementation claiming to satisfy the CT-style Merkle log requirement MUST:
 
@@ -1282,7 +1294,7 @@ An implementation MUST NOT:
 - Issue an STH with a lower tree_size than the operator's previous STH.
 - Omit the ML-DSA-65 signature from any published STH.
 
-#### 5.1.4.2 Fork Detection and Consistency Verification
+##### 5.1.4.2 Fork Detection and Consistency Verification
 
 **Fork detection.** A *log fork* occurs when an operator presents different log states to
 different participants (equivocation). LTP detects this via:
@@ -1550,7 +1562,7 @@ outages, network partitions, and regional disasters affect multiple nodes simult
 The worked example above is technically correct under independence but potentially misleading.
 See §5.4.1.1 for a correlated failure model that provides realistic availability estimates.
 
-#### 5.4.1.1 Correlated Failure Model
+##### 5.4.1.1 Correlated Failure Model
 
 To model realistic failures, we partition nodes into $R$ **failure domains** (typically
 geographic regions or administrative domains). Nodes within the same domain experience
